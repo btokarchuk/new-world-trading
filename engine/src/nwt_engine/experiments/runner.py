@@ -16,7 +16,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from nwt_contracts import PortfolioView, RiskContext, Side, TradingState
+from nwt_contracts import PortfolioView, RiskContext, TradingState
 
 from nwt_engine.broker import SimBroker
 from nwt_engine.core import BarEvent, EventQueue, ScheduleEvent, SimClock
@@ -24,11 +24,17 @@ from nwt_engine.data import HistoricalBarFeed, ParquetStore
 from nwt_engine.domain import Bar, CorporateAction, Fill, OrderTicket
 from nwt_engine.execution import NullGovernor, PositionSizer
 from nwt_engine.sleeves import LedgerEntry, SleeveLedger
+from nwt_engine.sleeves.allocator import (
+    NetPlan,
+    allocate_fill,
+    build_net_plans,
+    cross_price,
+)
 from nwt_engine.strategies import BaseStrategy, HistoryView, StrategyContext, get_strategy
 
 from .config import ExperimentConfig
 from .db import ResultsDB
-from .metrics import compute_metrics
+from .metrics import compute_metrics, compute_relative_metrics
 
 
 class ReconciliationError(RuntimeError):
@@ -127,8 +133,12 @@ class BacktestRunner:
             queue.push(ScheduleEvent(ts=ts, label="daily_close"))
 
         marks: dict[str, Decimal] = {}
-        order_sleeve: dict[str, str] = {}   # client_order_id -> sleeve_id
+        # client_order_id -> sleeve_id (single-sleeve order) or NetPlan (netted)
+        order_alloc: dict[str, str | NetPlan] = {}
+        # symbol -> [NetPlan] whose internal crosses await the next bar's open
+        pending_crosses: dict[str, list[NetPlan]] = {}
         order_seq = itertools.count(1)
+        cross_seq = itertools.count(1)
         cycle = 0
 
         try:
@@ -140,6 +150,9 @@ class BacktestRunner:
                     self._apply_sleeve_corp_actions(
                         event.bar, pending_ca, ledgers, journal
                     )
+                    self._resolve_crosses(
+                        event.bar, pending_crosses, ledgers, cross_seq, db, journal
+                    )
                     broker.on_bar(event.bar)
                     marks[event.bar.symbol] = event.bar.close
                     journal(
@@ -148,7 +161,7 @@ class BacktestRunner:
                         {"symbol": event.bar.symbol, "close": str(event.bar.close)},
                     )
                     for fill in broker.drain_events():
-                        self._apply_fill(fill, order_sleeve, ledgers, db, journal)
+                        self._apply_fill(fill, order_alloc, ledgers, db, journal)
 
                 elif isinstance(event, ScheduleEvent):
                     cycle += 1
@@ -163,7 +176,8 @@ class BacktestRunner:
                         sizer,
                         governor,
                         broker,
-                        order_sleeve,
+                        order_alloc,
+                        pending_crosses,
                         order_seq,
                         db,
                         journal,
@@ -174,14 +188,45 @@ class BacktestRunner:
             db.close()
             raise
 
-        results: list[SleeveResult] = []
-        for sleeve_id, ledger in ledgers.items():
+        def equity_series(sleeve_id: str) -> list[float]:
             rows = db.conn.execute(
                 "SELECT equity FROM equity_daily WHERE run_id=? AND sleeve_id=? ORDER BY ts",
                 (self.run_id, sleeve_id),
             ).fetchall()
-            equity_series = [float(r[0]) for r in rows]
-            sleeve_metrics = compute_metrics(equity_series)
+            return [float(r[0]) for r in rows]
+
+        control_series = (
+            equity_series(cfg.control_sleeve)
+            if cfg.control_sleeve and cfg.control_sleeve in ledgers
+            else None
+        )
+
+        results: list[SleeveResult] = []
+        for sleeve_id, ledger in ledgers.items():
+            series = equity_series(sleeve_id)
+            sleeve_metrics = compute_metrics(series)
+            if control_series is not None and sleeve_id != cfg.control_sleeve:
+                sleeve_metrics.update(compute_relative_metrics(series, control_series))
+
+            # Turnover and cost drag from recorded external fills (crosses excluded:
+            # they are fee-free transfers between sleeves, not market activity).
+            traded, fees_paid = db.conn.execute(
+                "SELECT COALESCE(SUM(CAST(qty AS REAL) * CAST(price AS REAL)), 0),"
+                " COALESCE(SUM(CAST(fees AS REAL)), 0) FROM fills"
+                " WHERE run_id=? AND sleeve_id=? AND client_order_id != 'internal_cross'",
+                (self.run_id, sleeve_id),
+            ).fetchone()
+            if series:
+                avg_equity = sum(series) / len(series)
+                years = max(len(series) / 252, 1e-9)
+                sleeve_metrics["turnover_annualized"] = (
+                    (traded / 2) / avg_equity / years if avg_equity > 0 else 0.0
+                )
+                sleeve_metrics["fees_total"] = fees_paid
+                sleeve_metrics["fee_drag_annualized"] = (
+                    fees_paid / avg_equity / years if avg_equity > 0 else 0.0
+                )
+
             for name, value in sleeve_metrics.items():
                 db.record_metric(self.run_id, sleeve_id, name, value)
             results.append(
@@ -243,33 +288,98 @@ class BacktestRunner:
                 remaining.append(action)
         pending_ca[bar.symbol] = remaining
 
-    def _apply_fill(self, fill: Fill, order_sleeve, ledgers, db, journal) -> None:
-        sleeve_id = order_sleeve.get(fill.client_order_id)
-        if sleeve_id is None:
+    def _apply_fill(self, fill: Fill, order_alloc, ledgers, db, journal) -> None:
+        target = order_alloc.get(fill.client_order_id)
+        if target is None:
             raise ReconciliationError(f"fill for unknown order {fill.client_order_id}")
-        ledgers[sleeve_id].apply(
-            LedgerEntry(
-                kind="fill",
-                ts=fill.ts,
-                symbol=fill.symbol,
-                side=fill.side,
-                qty=fill.qty,
-                price=fill.price,
-                fees=fill.fees,
+
+        if isinstance(target, str):
+            portions = [(target, fill.qty, fill.fees)]
+        else:
+            portions = [
+                (a.sleeve_id, a.qty, a.fees)
+                for a in allocate_fill(target, fill.qty, fill.fees)
+            ]
+
+        for index, (sleeve_id, qty, fees) in enumerate(portions):
+            ledgers[sleeve_id].apply(
+                LedgerEntry(
+                    kind="fill",
+                    ts=fill.ts,
+                    symbol=fill.symbol,
+                    side=fill.side,
+                    qty=qty,
+                    price=fill.price,
+                    fees=fees,
+                )
             )
-        )
-        payload = {
-            "fill_id": fill.fill_id,
-            "client_order_id": fill.client_order_id,
-            "symbol": fill.symbol,
-            "side": fill.side.value,
-            "qty": str(fill.qty),
-            "price": str(fill.price),
-            "fees": str(fill.fees),
-            "ts": fill.ts.isoformat(),
-        }
-        journal(fill.ts, "fill", payload)
-        db.record_fill(self.run_id, sleeve_id, **payload)
+            payload = {
+                "fill_id": f"{fill.fill_id}-{index}" if len(portions) > 1 else fill.fill_id,
+                "client_order_id": fill.client_order_id,
+                "symbol": fill.symbol,
+                "side": fill.side.value,
+                "qty": str(qty),
+                "price": str(fill.price),
+                "fees": str(fees),
+                "ts": fill.ts.isoformat(),
+                "sleeve": sleeve_id,
+            }
+            journal(fill.ts, "fill", payload)
+            db.record_fill(self.run_id, sleeve_id, **{k: v for k, v in payload.items() if k != "sleeve"})
+
+    def _resolve_crosses(
+        self, bar, pending_crosses, ledgers, cross_seq, db, journal
+    ) -> None:
+        """Execute internal crosses queued for this symbol at this bar's open.
+
+        Fee-free by design; the price is the bar open clamped into the fair
+        interval, so no leg transacts outside its own limit. Sleeve positions
+        move; the broker account is untouched — reconciliation still balances
+        because the cross nets to zero across sleeves.
+        """
+        plans = pending_crosses.pop(bar.symbol, None)
+        if not plans:
+            return
+        for plan in plans:
+            price = cross_price(plan, bar.open)
+            for cross in plan.crosses:
+                ledgers[cross.sleeve_id].apply(
+                    LedgerEntry(
+                        kind="fill",
+                        ts=bar.ts_open,
+                        symbol=bar.symbol,
+                        side=cross.side,
+                        qty=cross.qty,
+                        price=price,
+                        fees=Decimal("0"),
+                    )
+                )
+                fill_id = f"cross-{next(cross_seq)}"
+                payload = {
+                    "fill_id": fill_id,
+                    "client_order_id": None,
+                    "symbol": bar.symbol,
+                    "side": cross.side.value,
+                    "qty": str(cross.qty),
+                    "price": str(price),
+                    "fees": "0",
+                    "ts": bar.ts_open.isoformat(),
+                    "sleeve": cross.sleeve_id,
+                    "source": "internal_cross",
+                }
+                journal(bar.ts_open, "fill", payload)
+                db.record_fill(
+                    self.run_id,
+                    cross.sleeve_id,
+                    fill_id=fill_id,
+                    client_order_id="internal_cross",
+                    symbol=bar.symbol,
+                    side=cross.side.value,
+                    qty=str(cross.qty),
+                    price=str(price),
+                    fees="0",
+                    ts=bar.ts_open.isoformat(),
+                )
 
     def _mark_and_reconcile(self, ts, ledgers, broker, marks, db, journal) -> None:
         account = broker.get_account()
@@ -306,19 +416,18 @@ class BacktestRunner:
         sizer,
         governor,
         broker,
-        order_sleeve,
+        order_alloc,
+        pending_crosses,
         order_seq,
         db,
         journal,
     ) -> None:
         history = HistoryView(bars_by_symbol, ts)
         marks = {s: history.last_close(s) for s in bars_by_symbol}
-        sleeve_views: list[PortfolioView] = []
-        for sleeve_id, ledger in ledgers.items():
-            view_marks = {
-                s: m for s, m in marks.items() if m is not None
-            }
-            sleeve_views.append(ledger.snapshot(ts, view_marks))
+        view_marks = {s: m for s, m in marks.items() if m is not None}
+        sleeve_views = [
+            ledger.snapshot(ts, view_marks) for ledger in ledgers.values()
+        ]
 
         account = broker.get_account()
         ctx_all = RiskContext(
@@ -329,9 +438,10 @@ class BacktestRunner:
             sleeves=tuple(sleeve_views),
         )
 
+        # Gather approvals across ALL sleeves first, then net by symbol.
+        all_approved = []
         for sleeve_id, (strategy, params) in strategies.items():
             ledger = ledgers[sleeve_id]
-            view_marks = {s: m for s, m in marks.items() if m is not None}
             ctx = StrategyContext(ts, ledger.snapshot(ts, view_marks), history, params)
             proposals = strategy.on_schedule(ctx)
             if not proposals:
@@ -349,46 +459,92 @@ class BacktestRunner:
             intents = sizer.size(proposals, ledger, history, ts)
             if not intents:
                 continue
-            approved = governor.review(intents, ctx_all)
-            for approval in approved:
-                intent = approval.intent
-                coid = f"nwt-{cycle}-{intent.symbol.replace('/', '-')}-{next(order_seq)}"
-                ticket = OrderTicket(
-                    client_order_id=coid,
-                    symbol=intent.symbol,
-                    side=intent.side,
-                    qty=approval.approved_qty,
-                    notional=approval.approved_notional,
-                    limit_price=intent.limit_price,
-                    tif="day",
+            all_approved.extend(governor.review(intents, ctx_all))
+
+        if not all_approved:
+            return
+
+        def submit(sleeve_or_plan, symbol, side, qty, notional, limit_price) -> None:
+            coid = f"nwt-{cycle}-{symbol.replace('/', '-')}-{next(order_seq)}"
+            ticket = OrderTicket(
+                client_order_id=coid,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                notional=notional,
+                limit_price=limit_price,
+                tif="day",
+            )
+            order_alloc[coid] = sleeve_or_plan
+            ack = broker.submit(ticket)
+            sleeve_label = (
+                sleeve_or_plan if isinstance(sleeve_or_plan, str) else "netted"
+            )
+            row = {
+                "client_order_id": coid,
+                "sleeve": sleeve_label,
+                "symbol": symbol,
+                "side": side.value,
+                "qty": str(qty) if qty else None,
+                "limit_price": str(limit_price) if limit_price else None,
+                "state": ack.state.value,
+                "reason": ack.reason,
+            }
+            journal(ts, "order", row)
+            db.record_order(
+                self.run_id,
+                sleeve_label,
+                ts,
+                client_order_id=coid,
+                symbol=symbol,
+                side=side.value,
+                qty=str(qty) if qty else None,
+                notional=str(notional) if notional else None,
+                limit_price=str(limit_price) if limit_price else None,
+                state=ack.state.value,
+            )
+
+        # Notional (crypto) flow: not netted in v1, submitted per sleeve.
+        for approval in all_approved:
+            if approval.intent.qty is None:
+                submit(
+                    approval.intent.sleeve_id,
+                    approval.intent.symbol,
+                    approval.intent.side,
+                    None,
+                    approval.approved_notional,
+                    approval.intent.limit_price,
                 )
-                order_sleeve[coid] = sleeve_id
-                ack = broker.submit(ticket)
+
+        # Qty flow: net per symbol; crosses queue for the next bar's open.
+        for plan in build_net_plans(all_approved):
+            if plan.crosses:
+                pending_crosses.setdefault(plan.symbol, []).append(plan)
                 journal(
                     ts,
-                    "order",
+                    "net_plan",
                     {
-                        "client_order_id": coid,
-                        "sleeve": sleeve_id,
-                        "symbol": intent.symbol,
-                        "side": intent.side.value,
-                        "qty": str(approval.approved_qty) if approval.approved_qty else None,
-                        "limit_price": str(intent.limit_price) if intent.limit_price else None,
-                        "state": ack.state.value,
-                        "reason": ack.reason,
+                        "symbol": plan.symbol,
+                        "crosses": [c.model_dump(mode="json") for c in plan.crosses],
+                        "net_side": plan.net_side.value if plan.net_side else None,
+                        "net_qty": str(plan.net_qty),
                     },
                 )
-                db.record_order(
-                    self.run_id,
-                    sleeve_id,
-                    ts,
-                    client_order_id=coid,
-                    symbol=intent.symbol,
-                    side=intent.side.value,
-                    qty=str(approval.approved_qty) if approval.approved_qty else None,
-                    notional=str(approval.approved_notional)
-                    if approval.approved_notional
-                    else None,
-                    limit_price=str(intent.limit_price) if intent.limit_price else None,
-                    state=ack.state.value,
+            for leg in plan.unnetted_legs:
+                submit(
+                    leg.sleeve_id, plan.symbol, leg.side, leg.qty, None, leg.limit_price
+                )
+            if plan.net_side is not None and plan.net_qty > 0:
+                target = (
+                    plan.residual_legs[0].sleeve_id
+                    if len(plan.residual_legs) == 1
+                    else plan
+                )
+                submit(
+                    target,
+                    plan.symbol,
+                    plan.net_side,
+                    plan.net_qty,
+                    None,
+                    plan.net_limit,
                 )

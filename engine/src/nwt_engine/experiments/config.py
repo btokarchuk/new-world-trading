@@ -48,6 +48,8 @@ class ExperimentConfig(BaseModel):
     costs: CostModel = CostModel()
     instruments: list[InstrumentConfig]
     sleeves: list[SleeveConfig]
+    #: sleeve every other sleeve is benchmarked against (alpha/beta/IR metrics)
+    control_sleeve: str | None = None
     results_db: Path = Path("data/results.db")
 
     @property

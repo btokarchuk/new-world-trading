@@ -1,0 +1,13 @@
+# Crypto universe: trades around the clock, quoted to the cent, fractionable.
+# calendar quoted — bare 24_7 would YAML-parse as the integer 247.
+instruments:
+  - symbol: BTC/USD
+    asset_class: crypto
+    calendar: "24_7"
+    tick_size: "0.01"
+    fractionable: true
+  - symbol: ETH/USD
+    asset_class: crypto
+    calendar: "24_7"
+    tick_size: "0.01"
+    fractionable: true

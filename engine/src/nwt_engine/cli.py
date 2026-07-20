@@ -45,5 +45,28 @@ def make_fixture(
     typer.echo(f"wrote synthetic fixture for {symbol} under {root}")
 
 
+@app.command("ingest-crypto")
+def ingest_crypto(
+    symbols: str = typer.Option("BTC/USD,ETH/USD", help="Comma-separated crypto symbols."),
+    start: str = typer.Option(..., help="Start date (YYYY-MM-DD)."),
+    end: str | None = typer.Option(None, help="End date (YYYY-MM-DD); defaults to today."),
+    root: Path = typer.Option(Path("data/parquet"), help="Parquet store root."),
+) -> None:
+    """Ingest daily crypto bars from Alpaca's keyless historical endpoint."""
+    from datetime import date
+
+    from nwt_engine.data import ParquetStore
+    from nwt_engine.data.ingest import ingest_crypto as run_ingest
+
+    counts = run_ingest(
+        ParquetStore(root),
+        [s.strip() for s in symbols.split(",") if s.strip()],
+        date.fromisoformat(start),
+        date.fromisoformat(end) if end else date.today(),
+    )
+    for symbol, count in counts.items():
+        typer.echo(f"{symbol}: {count} bars")
+
+
 if __name__ == "__main__":
     app()

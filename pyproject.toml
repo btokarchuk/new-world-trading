@@ -5,11 +5,12 @@ description = "Personal automated-trading research platform (workspace root)"
 requires-python = ">=3.12"
 
 [tool.uv.workspace]
-members = ["contracts", "engine"]
+members = ["contracts", "engine", "research"]
 
 [tool.uv.sources]
 nwt-contracts = { workspace = true }
 nwt-engine = { workspace = true }
+nwt-research = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -24,11 +25,12 @@ line-length = 100
 target-version = "py312"
 
 [tool.pytest.ini_options]
-testpaths = ["contracts/tests", "engine/tests"]
+testpaths = ["contracts/tests", "engine/tests", "research/tests"]
 markers = [
     "paper: contract tests against a real Alpaca paper account (manual/nightly only)",
+    "network: hits live external APIs (excluded by default)",
 ]
-addopts = "-m 'not paper'"
+addopts = "-m 'not paper and not network'"
 
 [tool.importlinter]
 root_packages = ["nwt_engine", "nwt_contracts"]

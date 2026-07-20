@@ -14,7 +14,7 @@ import itertools
 from datetime import datetime
 from decimal import Decimal
 
-from nwt_contracts import AssetClass, Side
+from nwt_contracts import Side
 
 from nwt_engine.domain import (
     Bar,

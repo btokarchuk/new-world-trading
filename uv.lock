@@ -15,6 +15,7 @@ members = [
     "new-world-trading",
     "nwt-contracts",
     "nwt-engine",
+    "nwt-research",
 ]
 
 [[package]]
@@ -420,6 +421,25 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.12" },
+]
+
+[[package]]
+name = "nwt-research"
+version = "0.1.0"
+source = { editable = "research" }
+dependencies = [
+    { name = "numpy" },
+    { name = "nwt-contracts" },
+    { name = "nwt-engine" },
+    { name = "pandas" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "nwt-contracts", editable = "contracts" },
+    { name = "nwt-engine", editable = "engine" },
+    { name = "pandas", specifier = ">=2.2" },
 ]
 
 [[package]]

@@ -1,0 +1,43 @@
+# Core diversified ETF universe: US equities (large/small), international,
+# emerging, treasuries, and gold. XNYS calendar throughout.
+instruments:
+  - symbol: SPY
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: QQQ
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: IWM
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: EFA
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: EEM
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: TLT
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: IEF
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
+  - symbol: GLD
+    asset_class: etf
+    calendar: XNYS
+    tick_size: "0.01"
+    fractionable: false
