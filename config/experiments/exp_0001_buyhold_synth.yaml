@@ -1,0 +1,21 @@
+# Walking-skeleton experiment: buy-and-hold the synthetic fixture symbol.
+# Generate data first:  uv run nwt make-fixture
+id: exp_0001_buyhold_synth
+mode: backtest
+data:
+  provider: synthetic
+  timeframe: "1d"
+  root: data/parquet
+costs:
+  equity_slippage_bps: "5"
+instruments:
+  - symbol: SYNTH
+    asset_class: etf
+    calendar: XNYS
+sleeves:
+  - sleeve_id: control
+    strategy: buyhold
+    capital: "10000"
+    params:
+      symbol: SYNTH
+results_db: data/results.db

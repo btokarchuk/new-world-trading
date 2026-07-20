@@ -1,0 +1,26 @@
+# Data & state — never committed
+data/
+secrets/
+*.env
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+dist/
+*.egg-info/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Xcode / iOS (populated in Phase 5)
+ios/**/xcuserdata/
+ios/**/DerivedData/

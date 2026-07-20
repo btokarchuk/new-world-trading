@@ -1,0 +1,46 @@
+[project]
+name = "new-world-trading"
+version = "0.1.0"
+description = "Personal automated-trading research platform (workspace root)"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = ["contracts", "engine"]
+
+[tool.uv.sources]
+nwt-contracts = { workspace = true }
+nwt-engine = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "import-linter>=2.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["contracts/tests", "engine/tests"]
+markers = [
+    "paper: contract tests against a real Alpaca paper account (manual/nightly only)",
+]
+addopts = "-m 'not paper'"
+
+[tool.importlinter]
+root_packages = ["nwt_engine", "nwt_contracts"]
+
+[[tool.importlinter.contracts]]
+name = "Strategies and sleeves never import broker adapters"
+type = "forbidden"
+source_modules = ["nwt_engine.strategies", "nwt_engine.sleeves"]
+forbidden_modules = ["nwt_engine.broker"]
+
+[[tool.importlinter.contracts]]
+name = "Contracts package stays dependency-free of the engine"
+type = "forbidden"
+source_modules = ["nwt_contracts"]
+forbidden_modules = ["nwt_engine"]
