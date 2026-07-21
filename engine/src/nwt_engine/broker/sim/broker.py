@@ -140,8 +140,13 @@ class SimBroker(Broker):
             order = self._open[coid]
             if order.ticket.symbol != bar.symbol:
                 continue
-            if order.accepted_ts >= bar.ts_open:
+            if order.accepted_ts > bar.ts_open:
                 continue  # order arrived during/after this bar; fills next bar
+            # Boundary note: accepted_ts == ts_open fills at this bar's open.
+            # Required for midnight-stamped daily bars (Alpaca convention:
+            # ts_close(N) == ts_open(N+1)), where a close-of-N decision IS the
+            # open-of-N+1 instant; economically it is still decide-on-N's-data,
+            # fill-at-next-session's-open. Session-true stamps are unaffected.
             fill = self._try_fill(order.ticket, bar)
             if fill is not None:
                 self._apply_fill(fill)

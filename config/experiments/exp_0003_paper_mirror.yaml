@@ -1,0 +1,52 @@
+# The paper deployment's sleeves, rewound over real 2016-2026 daily bars.
+#
+# HONESTY CAVEAT (until corporate-action ingest lands in Phase 4): no dividend
+# data has been ingested for equities, so this is a PRICE-return backtest.
+# It understates total return everywhere, and unevenly: bond ETFs (TLT/IEF)
+# and value-tilted holdings are penalized more than low-yield growth. Directional
+# comparisons between sleeves are indicative only; vs-control spreads are the
+# most trustworthy numbers since all sleeves share the handicap.
+
+id: exp_0003_paper_mirror
+mode: backtest
+data:
+  provider: alpaca
+  timeframe: 1d
+  root: data/parquet
+control_sleeve: control
+instruments:
+  - { symbol: SPY, asset_class: etf }
+  - { symbol: QQQ, asset_class: etf }
+  - { symbol: IWM, asset_class: etf }
+  - { symbol: EFA, asset_class: etf }
+  - { symbol: EEM, asset_class: etf }
+  - { symbol: TLT, asset_class: etf }
+  - { symbol: IEF, asset_class: etf }
+  - { symbol: GLD, asset_class: etf }
+sleeves:
+  - sleeve_id: control
+    strategy: buyhold
+    capital: "2500"
+    params: { symbol: SPY }
+  - sleeve_id: trend_etf
+    strategy: trend_ma
+    capital: "3000"
+    params:
+      symbols: [SPY, QQQ, IWM, EFA, TLT, GLD]
+      ma: 200
+      band_bps: 100
+  - sleeve_id: momentum
+    strategy: momentum_rotation
+    capital: "2000"
+    params:
+      symbols: [SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD]
+      n: 2
+      lookback: 252
+      skip: 21
+  - sleeve_id: mean_rev
+    strategy: meanrev_zscore
+    capital: "1000"
+    params:
+      symbols: [SPY, QQQ, IWM]
+      lookback: 20
+      max_positions: 2

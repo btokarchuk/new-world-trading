@@ -90,3 +90,54 @@ def test_multi_sleeve_determinism(multi_root: Path, tmp_path: Path):
     assert [s.final_equity for s in first.sleeves] == [
         s.final_equity for s in second.sleeves
     ]
+
+
+def test_midnight_stamped_bars_still_fill(tmp_path):
+    """Regression: Alpaca-convention daily bars (ts_close(N) == ts_open(N+1))
+    must not silently starve fills. Root cause of the flat-control bug found
+    in the first real-data rewind (2026-07-21)."""
+    from datetime import UTC, datetime, timedelta
+    from decimal import Decimal
+
+    from nwt_engine.domain import Bar, Timeframe
+
+    store = ParquetStore(tmp_path / "pq")
+    bars = []
+    ts = datetime(2024, 1, 1, 5, tzinfo=UTC)
+    price = Decimal("100.00")
+    for _ in range(10):
+        bars.append(
+            Bar(
+                symbol="MIDNIGHT",
+                timeframe=Timeframe.D1,
+                ts_open=ts,
+                ts_close=ts + timedelta(days=1),  # == next bar's ts_open
+                open=price,
+                high=price + 1,
+                low=price - 1,
+                close=price,
+                volume=Decimal("1000000"),
+            )
+        )
+        ts += timedelta(days=1)
+    store.write_bars("synthetic", Timeframe.D1, "MIDNIGHT", bars)
+
+    cfg = ExperimentConfig(
+        id="test_midnight",
+        mode="backtest",
+        data=DataConfig(provider="synthetic", root=tmp_path / "pq"),
+        instruments=[InstrumentConfig(symbol="MIDNIGHT", asset_class="etf")],
+        sleeves=[
+            SleeveConfig(
+                sleeve_id="control",
+                strategy="buyhold",
+                capital="10000",
+                params={"symbol": "MIDNIGHT"},
+            )
+        ],
+        results_db=tmp_path / "r.db",
+    )
+    result = BacktestRunner(cfg).run()
+    control = result.sleeves[0]
+    # The one-shot buyhold order must have filled: equity is invested, not cash.
+    assert control.final_equity != Decimal("10000")
