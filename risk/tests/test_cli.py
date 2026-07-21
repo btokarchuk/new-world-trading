@@ -223,3 +223,21 @@ def test_redacted_argv_hides_key_material():
         "nwt-risk", "status", "--env", "paper",
         "--api-key=***", "--secret", "***", "--db", "data/risk.db",
     ]
+
+
+def test_env_file_loading(tmp_path, monkeypatch):
+    from nwt_risk.cli import _load_env_file
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "paper.env").write_text(
+        "# comment\nALPACA_PAPER_KEY_ID=from_file\nALPACA_PAPER_SECRET=filesecret\n"
+    )
+    monkeypatch.delenv("ALPACA_PAPER_KEY_ID", raising=False)
+    monkeypatch.setenv("ALPACA_PAPER_SECRET", "from_real_env")
+    _load_env_file("paper")
+    import os
+
+    assert os.environ["ALPACA_PAPER_KEY_ID"] == "from_file"
+    assert os.environ["ALPACA_PAPER_SECRET"] == "from_real_env"  # real env wins
+    monkeypatch.delenv("ALPACA_PAPER_KEY_ID")

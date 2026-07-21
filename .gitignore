@@ -1,10 +1,14 @@
 # Data & state — never committed
 data/
-secrets/
+# secrets/* (not secrets/) so the negation below can re-include templates;
+# git never descends into a directory ignored as a whole
+secrets/*
 *.env
 *.db
 *.db-wal
 *.db-shm
+# ...except committed secret templates (placeholders only, never real values)
+!secrets/*.example
 
 # Python
 __pycache__/

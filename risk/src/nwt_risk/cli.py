@@ -51,13 +51,29 @@ def _check_env(env: str) -> str:
     return env
 
 
+def _load_env_file(env: str) -> None:
+    """Load secrets/{env}.env if present. Explicit path, no cwd-walking dotenv
+    magic; real environment variables always win over file values."""
+    path = Path("secrets") / f"{env}.env"
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip())
+
+
 def _make_broker(env: str):
+    _load_env_file(env)
     prefix = "ALPACA_PAPER" if env == "paper" else "ALPACA_LIVE"
     key_id = os.environ.get(f"{prefix}_KEY_ID", "")
     secret = os.environ.get(f"{prefix}_SECRET", "")
     if not key_id or not secret:
         raise MissingCredentialsError(
-            f"missing broker credentials: set {prefix}_KEY_ID and {prefix}_SECRET"
+            f"missing broker credentials: set {prefix}_KEY_ID and {prefix}_SECRET "
+            f"(or create secrets/{env}.env — see secrets/paper.env.example)"
         )
     from nwt_engine.broker.alpaca import AlpacaHttpBroker
 
