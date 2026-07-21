@@ -1,0 +1,71 @@
+# ==========================================================================
+# nwt risk config — $10,000 experiment account, Alpaca, long-only v1.
+# Every limit is a HARD BLOCK. Changing this file changes its hash; a hash
+# change while live-armed de-arms to paper+HALTED (config change == deploy).
+# Values reviewed, not auto-scaled, when equity moves +/-20%.
+# ==========================================================================
+
+equity_reference_usd: "10000"
+
+order:
+  max_notional_usd: "500"        # 5% of equity: one insane order costs <= 5%
+  max_shares: "200"              # secondary fat-finger cap
+  min_notional_usd: "25"         # dust guard / crypto fee-floor
+  price_collar_pct_equity: "2.0" # reject limits >2% from quote reference
+  price_collar_pct_crypto: "5.0"
+  suspect_quote_divergence_pct: "1.0"  # mid vs last disagree >1% => quote suspect
+
+exposure:
+  max_symbol_notional_usd: "1000"   # 10% per symbol incl. open buy orders
+  max_gross_notional_usd: "9000"    # 90%: permanent 10% cash buffer
+  max_position_count: 12
+  crypto_sleeve_max_usd: "750"      # weaker server-side protection => small cap
+  min_price_usd: "5.00"             # no sub-$5 names
+  max_pct_adv: "0.01"               # <=1% of 20d ADV
+
+duplicates:
+  rolling_window_s: 90
+  one_open_entry_per_symbol_per_sleeve: true
+
+rate:
+  global_per_min: 5
+  global_per_day: 40
+  per_symbol_per_min: 2
+  per_symbol_per_day: 6
+
+session:
+  regular_hours_only: true
+  no_new_entries_after_et: "15:45"
+  crypto_window_local: ["08:00", "22:00"]   # protective exits exempt
+
+staleness:
+  max_quote_age_s: 30
+  max_reconcile_age_s: 300
+  max_clock_skew_s: 2
+
+sleeves:
+  control:     { budget_usd: "2500", max_order_usd: "500" }
+  trend_etf:   { budget_usd: "3000", max_order_usd: "500" }
+  momentum:    { budget_usd: "2000", max_order_usd: "400" }
+  mean_rev:    { budget_usd: "1000", max_order_usd: "400" }
+  crypto_momo: { budget_usd: "750",  max_order_usd: "250" }
+  llm_analyst: { budget_usd: "1000", max_order_usd: "200", live_enabled: false }
+
+breakers:
+  daily_loss_usd: "200"        # 2% => HALT
+  drawdown_warn_pct: "6.0"     # from persisted high-water mark => REDUCING
+  drawdown_halt_pct: "10.0"    # => HALT pending written post-mortem
+  consecutive_losses: 4        # 4 losing round trips / 48h => REDUCING
+  consecutive_window_h: 48
+  cool_off_h: 24               # the only self-clearing breaker
+  cooldown_after_exit_h: 4
+  cooldown_after_stop_h: 24
+  rejection_count: 5           # 5 broker rejections / 10 min => HALT
+  rejection_window_min: 10
+
+reconcile:
+  startup_delay_s: 10
+  interval_s: 60
+  in_flight_grace_s: 5
+  cash_tolerance_usd: "5.00"
+  crypto_qty_rel_tolerance: "0.000001"

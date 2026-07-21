@@ -1,0 +1,41 @@
+# Attended paper deployment (Phase 3).
+# The Alpaca paper account balance must be reset to exactly
+# sum(sleeve capitals) + unallocated_buffer_usd = $10,000 before the first
+# cycle, or reconciliation will (correctly) refuse to trade.
+#
+# Sleeve capitals must stay consistent with the budgets in config/risk.yaml.
+
+universe_files:
+  - config/universes/core_etfs.yaml
+  - config/universes/crypto.yaml
+data_root: data/parquet
+data_provider: alpaca
+unallocated_buffer_usd: "750"
+
+sleeves:
+  - sleeve_id: control
+    strategy: buyhold
+    capital: "2500"
+    params: { symbol: SPY }
+  - sleeve_id: trend_etf
+    strategy: trend_ma
+    capital: "3000"
+    params:
+      symbols: [SPY, QQQ, IWM, EFA, TLT, GLD]
+      ma: 200
+      band_bps: 100
+  - sleeve_id: momentum
+    strategy: momentum_rotation
+    capital: "2000"
+    params:
+      symbols: [SPY, QQQ, IWM, EFA, EEM, TLT, IEF, GLD]
+      n: 2
+      lookback: 252
+      skip: 21
+  - sleeve_id: mean_rev
+    strategy: meanrev_zscore
+    capital: "1000"
+    params:
+      symbols: [SPY, QQQ, IWM]
+      lookback: 20
+      max_positions: 2

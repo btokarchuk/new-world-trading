@@ -5,12 +5,13 @@ description = "Personal automated-trading research platform (workspace root)"
 requires-python = ">=3.12"
 
 [tool.uv.workspace]
-members = ["contracts", "engine", "research"]
+members = ["contracts", "engine", "research", "risk"]
 
 [tool.uv.sources]
 nwt-contracts = { workspace = true }
 nwt-engine = { workspace = true }
 nwt-research = { workspace = true }
+nwt-risk = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -25,7 +26,7 @@ line-length = 100
 target-version = "py312"
 
 [tool.pytest.ini_options]
-testpaths = ["contracts/tests", "engine/tests", "research/tests"]
+testpaths = ["contracts/tests", "engine/tests", "research/tests", "risk/tests"]
 markers = [
     "paper: contract tests against a real Alpaca paper account (manual/nightly only)",
     "network: hits live external APIs (excluded by default)",
@@ -33,12 +34,18 @@ markers = [
 addopts = "-m 'not paper and not network'"
 
 [tool.importlinter]
-root_packages = ["nwt_engine", "nwt_contracts"]
+root_packages = ["nwt_engine", "nwt_contracts", "nwt_risk"]
 
 [[tool.importlinter.contracts]]
 name = "Strategies and sleeves never import broker adapters"
 type = "forbidden"
 source_modules = ["nwt_engine.strategies", "nwt_engine.sleeves"]
+forbidden_modules = ["nwt_engine.broker"]
+
+[[tool.importlinter.contracts]]
+name = "Risk checks, state, and breakers never import broker adapters"
+type = "forbidden"
+source_modules = ["nwt_risk.checks", "nwt_risk.state", "nwt_risk.breakers"]
 forbidden_modules = ["nwt_engine.broker"]
 
 [[tool.importlinter.contracts]]

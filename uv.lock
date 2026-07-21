@@ -16,6 +16,7 @@ members = [
     "nwt-contracts",
     "nwt-engine",
     "nwt-research",
+    "nwt-risk",
 ]
 
 [[package]]
@@ -440,6 +441,29 @@ requires-dist = [
     { name = "nwt-contracts", editable = "contracts" },
     { name = "nwt-engine", editable = "engine" },
     { name = "pandas", specifier = ">=2.2" },
+]
+
+[[package]]
+name = "nwt-risk"
+version = "0.1.0"
+source = { editable = "risk" }
+dependencies = [
+    { name = "httpx" },
+    { name = "nwt-contracts" },
+    { name = "nwt-engine" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "nwt-contracts", editable = "contracts" },
+    { name = "nwt-engine", editable = "engine" },
+    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "typer", specifier = ">=0.12" },
 ]
 
 [[package]]
