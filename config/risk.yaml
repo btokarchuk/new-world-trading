@@ -8,7 +8,12 @@
 equity_reference_usd: "10000"
 
 order:
-  max_notional_usd: "500"        # 5% of equity: one insane order costs <= 5%
+  # WHOLE-SHARE FLOOR: equities trade in whole shares, so this cap must exceed
+  # the priciest instrument's share price or that symbol is untradeable. Raised
+  # 500 -> 1000 on 2026-08-02: SPY was $746 and QQQ $688, so the control sleeve
+  # could never buy its own benchmark. 10% of a $10k account per order; the
+  # gross/symbol/sleeve caps and rate limits still bound total damage.
+  max_notional_usd: "1000"
   max_shares: "200"              # secondary fat-finger cap
   min_notional_usd: "25"         # dust guard / crypto fee-floor
   price_collar_pct_equity: "2.0" # reject limits >2% from quote reference

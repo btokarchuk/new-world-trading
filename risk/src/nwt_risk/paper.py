@@ -393,6 +393,27 @@ class PaperCycle:
 
     # -- the cycle -----------------------------------------------------------
 
+    def preflight(self, marks: dict[str, Decimal]) -> list[str]:
+        """Config-vs-reality sanity checks run before every cycle.
+
+        The whole-share floor is the one that bites: equities trade in whole
+        shares, so any symbol priced above the per-order notional cap can never
+        produce a legal order — the sleeve holding it silently never trades.
+        Caught in the first live rehearsal (SPY at $746 vs a $500 cap).
+        """
+        problems: list[str] = []
+        cap = self.cfg.order.max_notional_usd
+        for inst in self.universe.instruments:
+            if inst.fractionable:
+                continue
+            price = marks.get(inst.symbol)
+            if price is not None and price > cap:
+                problems.append(
+                    f"{inst.symbol} at {price} exceeds max_notional_usd {cap}: "
+                    "one whole share is unbuyable, orders will always reject"
+                )
+        return problems
+
     def run_cycle(self) -> CycleReport:
         now = self.now_fn()
         notes: list[str] = []
@@ -437,6 +458,10 @@ class PaperCycle:
         for symbol, kwargs in self.quotes_loader().items():
             quote_views[symbol] = QuoteView(symbol=symbol, **kwargs)
             marks[symbol] = quote_views[symbol].last
+
+        for problem in self.preflight(marks):
+            notes.append(f"PREFLIGHT: {problem}")
+            self.store.audit(now, "preflight_problem", {"detail": problem})
 
         # Strategy decisions from ledger truth.
         proposals = []

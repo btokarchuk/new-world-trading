@@ -24,7 +24,12 @@ CREATE TABLE IF NOT EXISTS system_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     state TEXT NOT NULL,
     mode TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- Operator ARMING INTENT, persisted and distinct from current state. A human
+    -- sets it by resuming to ACTIVE; any safety trip or human downshift clears it.
+    -- Process restarts must NOT clear it, or a single crashed cycle would silently
+    -- disable paper auto-resume forever (found in the first live rehearsal).
+    armed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS breaker_latches (
     latch_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,8 +77,6 @@ class TradingStateMachine:
     def __init__(self, db_path: Path | str, mode: str, now_fn: Callable[[], datetime]) -> None:
         self._mode = mode
         self._now = now_fn
-        # Known only after on_startup(); None forbids the paper auto-resume path.
-        self._pre_shutdown_state: TradingState | None = None
         self._conn = sqlite3.connect(str(db_path))
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
@@ -86,13 +89,19 @@ class TradingStateMachine:
                     (TradingState.HALTED.value, mode, self._now().isoformat()),
                 )
             else:
+                columns = {
+                    r[1] for r in self._conn.execute("PRAGMA table_info(system_state)")
+                }
+                if "armed" not in columns:
+                    self._conn.execute(
+                        "ALTER TABLE system_state ADD COLUMN armed INTEGER NOT NULL DEFAULT 0"
+                    )
                 self._conn.execute("UPDATE system_state SET mode = ? WHERE id = 1", (mode,))
 
     def on_startup(self) -> None:
         now = self._now()
         with self._conn:
             prev = self._read_state()
-            self._pre_shutdown_state = prev
             if not self._unacked_exists("startup"):
                 self._insert_latch(
                     "startup", ReasonCode.STARTUP, "restart_pending_reconcile", now
@@ -102,6 +111,15 @@ class TradingStateMachine:
                 now, prev, TradingState.HALTED, "system",
                 ReasonCode.STARTUP, "restart_pending_reconcile",
             )
+
+    def armed(self) -> bool:
+        row = self._conn.execute("SELECT armed FROM system_state WHERE id = 1").fetchone()
+        return bool(row[0])
+
+    def _set_armed(self, value: bool) -> None:
+        self._conn.execute(
+            "UPDATE system_state SET armed = ? WHERE id = 1", (1 if value else 0,)
+        )
 
     def current(self) -> StateRecord:
         row = self._conn.execute(
@@ -132,6 +150,7 @@ class TradingStateMachine:
             else:
                 self._insert_latch(breaker, reason, detail, now)
             self._set_state(to, now)
+            self._set_armed(False)  # a safety trip always demands a human to re-arm
             self._log(now, current, to, breaker, reason, detail)
 
     def request_transition(
@@ -141,7 +160,11 @@ class TradingStateMachine:
         with self._conn:
             current = self._read_state()
             if SAFETY_RANK[to] >= SAFETY_RANK[current]:
+                # Downshift (or no-op): the operator is stepping back from trading,
+                # so arming intent goes with it.
                 self._set_state(to, now)
+                if to is not TradingState.ACTIVE:
+                    self._set_armed(False)
                 self._log(now, current, to, actor, ReasonCode.OPERATOR, "requested")
                 return TransitionResult(ok=True, state=to)
             # Unsafer direction: typed confirmation + ack of every un-acked latch.
@@ -162,6 +185,7 @@ class TradingStateMachine:
                 )
             self._ack(unacked)
             self._set_state(to, now)
+            self._set_armed(to is TradingState.ACTIVE)
             self._log(now, current, to, actor, ReasonCode.OPERATOR, confirmation)
             return TransitionResult(ok=True, state=to)
 
@@ -177,8 +201,9 @@ class TradingStateMachine:
             if not startup:
                 return
             self._ack([latch.latch_id for latch in startup])
-            clean = self._pre_shutdown_state is TradingState.ACTIVE
-            if len(unacked) == 1 and clean:
+            # Resume only if the operator's arming intent survives AND the startup
+            # latch is the only thing outstanding (any breaker latch blocks it).
+            if len(unacked) == 1 and self.armed():
                 self._set_state(TradingState.ACTIVE, now)
                 self._log(
                     now, current, TradingState.ACTIVE, "system",

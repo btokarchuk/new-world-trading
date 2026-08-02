@@ -324,3 +324,62 @@ def test_no_order_permitting_state_with_unacked_halt_latches(ops):
                 if not latch.acked and latch.latch_id in halt_latches
             ]
             assert live_halt == []
+
+
+def _fresh(tmp_path, now_fn, mode="paper"):
+    return TradingStateMachine(tmp_path / "s.db", mode, now_fn)
+
+
+def test_arming_intent_survives_crashed_cycles(tmp_path):
+    """Regression (first live rehearsal, 2026-08-02): a cycle that died after
+    on_startup but before mark_reconciled used to poison auto-resume forever,
+    because 'clean' was inferred from the in-memory pre-shutdown state. Arming
+    intent is now persisted, so only a real safety event revokes it."""
+    clock = [datetime(2026, 8, 2, 23, 0, tzinfo=UTC)]
+    now = lambda: clock[0]  # noqa: E731
+
+    machine = _fresh(tmp_path, now)
+    machine.on_startup()
+    machine.request_transition(
+        TradingState.ACTIVE,
+        actor="cli",
+        confirmation="RESUME paper",
+        acked_latch_ids=[latch.latch_id for latch in machine.current().latches if not latch.acked],
+    )
+    assert machine.armed()
+
+    # A cycle starts and dies before reconciling (no mark_reconciled call).
+    clock[0] += timedelta(minutes=1)
+    crashed = _fresh(tmp_path, now)
+    crashed.on_startup()
+    assert crashed.state() is TradingState.HALTED
+
+    # The next healthy cycle still auto-resumes: arming intent was never revoked.
+    clock[0] += timedelta(minutes=1)
+    healthy = _fresh(tmp_path, now)
+    healthy.on_startup()
+    healthy.mark_reconciled()
+    assert healthy.state() is TradingState.ACTIVE
+
+
+def test_breaker_trip_revokes_arming(tmp_path):
+    clock = [datetime(2026, 8, 2, 23, 0, tzinfo=UTC)]
+    now = lambda: clock[0]  # noqa: E731
+
+    machine = _fresh(tmp_path, now)
+    machine.on_startup()
+    machine.request_transition(
+        TradingState.ACTIVE,
+        actor="cli",
+        confirmation="RESUME paper",
+        acked_latch_ids=[latch.latch_id for latch in machine.current().latches if not latch.acked],
+    )
+    machine.trip("daily_loss", TradingState.HALTED, ReasonCode.DAILY_LOSS, "limit hit")
+    assert not machine.armed()
+
+    # Even with the breaker latch acked out-of-band, no automatic resume happens.
+    clock[0] += timedelta(minutes=1)
+    after = _fresh(tmp_path, now)
+    after.on_startup()
+    after.mark_reconciled()
+    assert after.state() is TradingState.HALTED

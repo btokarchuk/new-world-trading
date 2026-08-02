@@ -451,7 +451,8 @@ def test_hostile_intent_flood_all_rejected_with_exact_reasons(tmp_path):
             ReasonCode.PHANTOM_POSITION,
         ),
         (_intent("h-13", "MINN", qty=D("2"), limit_price=D("10")), ReasonCode.MIN_NOTIONAL),
-        (_intent("h-14", "PRCY", qty=D("1"), limit_price=D("600")), ReasonCode.ORDER_NOTIONAL_CAP),
+        # One share priced above the $1,000 cap: clamps to zero shares -> reject.
+        (_intent("h-14", "PRCY", qty=D("1"), limit_price=D("1200")), ReasonCode.ORDER_NOTIONAL_CAP),
         (_intent("h-15", "ROGU", sleeve_id="rogue"), ReasonCode.SLEEVE_BUDGET_EXCEEDED),
         (_intent("h-16", "COLL", qty=D("4"), limit_price=D("103")), ReasonCode.PRICE_COLLAR_BREACH),
         (_intent("h-17", "SUSP", qty=D("4"), limit_price=D("104")), ReasonCode.SUSPECT_QUOTE),
