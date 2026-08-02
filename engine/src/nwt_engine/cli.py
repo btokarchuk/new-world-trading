@@ -68,5 +68,78 @@ def ingest_crypto(
         typer.echo(f"{symbol}: {count} bars")
 
 
+@app.command("ingest-stocks")
+def ingest_stocks(
+    symbols: str = typer.Option(
+        "SPY,QQQ,IWM,EFA,EEM,TLT,IEF,GLD", help="Comma-separated equity symbols."
+    ),
+    start: str = typer.Option(..., help="Start date (YYYY-MM-DD)."),
+    end: str | None = typer.Option(None, help="End date (YYYY-MM-DD); defaults to today."),
+    root: Path = typer.Option(Path("data/parquet"), help="Parquet store root."),
+    env: str = typer.Option("paper", help="Key set to use: paper|live."),
+    feed: str = typer.Option(
+        "iex", help="Data feed: iex|sip (sip needs a paid data plan)."
+    ),
+) -> None:
+    """Ingest daily equity bars from Alpaca (requires API keys).
+
+    Merges with existing bars: re-running over an overlapping window is safe
+    and is the intended way to top up before a decision cycle.
+    """
+    import os
+    from datetime import date
+
+    from nwt_engine.data import ParquetStore
+    from nwt_engine.data.ingest.alpaca_stocks import fetch_stock_daily_bars
+    from nwt_engine.domain import Timeframe
+
+    env_file = Path("secrets") / f"{env}.env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip())
+
+    prefix = "ALPACA_PAPER" if env == "paper" else "ALPACA_LIVE"
+    key_id = os.environ.get(f"{prefix}_KEY_ID", "")
+    secret = os.environ.get(f"{prefix}_SECRET", "")
+    if not key_id or not secret:
+        typer.echo(
+            f"error: missing {prefix}_KEY_ID / {prefix}_SECRET "
+            f"(or create secrets/{env}.env)",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    store = ParquetStore(root)
+    symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
+    fetched = fetch_stock_daily_bars(
+        symbol_list,
+        date.fromisoformat(start),
+        date.fromisoformat(end) if end else date.today(),
+        key_id,
+        secret,
+        feed=feed,
+    )
+    for symbol in symbol_list:
+        new_bars = fetched.get(symbol, [])
+        if not new_bars:
+            typer.echo(f"{symbol}: no bars returned")
+            continue
+        try:
+            existing = store.read_bars("alpaca", Timeframe.D1, symbol)
+        except FileNotFoundError:
+            existing = []
+        merged = {bar.ts_open: bar for bar in existing}
+        merged.update({bar.ts_open: bar for bar in new_bars})
+        ordered = sorted(merged.values(), key=lambda b: b.ts_open)
+        store.write_bars("alpaca", Timeframe.D1, symbol, ordered)
+        typer.echo(
+            f"{symbol}: +{len(new_bars)} fetched, {len(ordered)} total "
+            f"through {ordered[-1].ts_open.date()}"
+        )
+
+
 if __name__ == "__main__":
     app()
