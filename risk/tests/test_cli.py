@@ -190,12 +190,32 @@ def test_live_resume_requires_review_flag(tmp_path, monkeypatch):
     assert machine.state() is TradingState.ACTIVE
 
 
-def test_drill_exits_nonzero(tmp_path, monkeypatch):
+def test_drill_prints_steps_and_exits_nonzero_on_failure(tmp_path, monkeypatch):
+    # The stub config declares no sleeves, so the hostile-intent flood cannot be
+    # built — the drill must say so and fail rather than report a hollow pass.
     fake, db, config, args = _setup(tmp_path, monkeypatch)
 
     result = runner.invoke(cli.app, ["drill", "--scenario", "insanity", *args])
     assert result.exit_code == 1
-    assert "not yet implemented (Phase 4)" in result.output
+    assert "FAIL [hostile-intent-flood]" in result.output
+    assert "PASS [kill-switch]" in result.output
+    assert "drill FAILED" in result.output
+    assert fake.cancel_all_calls == 1
+    assert _machine(db).state() is TradingState.HALTED
+
+
+def test_drill_refuses_live_before_building_a_broker(tmp_path, monkeypatch):
+    fake, db, config, args = _setup(tmp_path, monkeypatch, env="live")
+
+    result = runner.invoke(cli.app, ["drill", *args])
+    assert result.exit_code == 2
+    assert "paper only" in result.output
+    assert fake.cancel_all_calls == 0
+    drills = [
+        alert for alert in AlertOutbox(db, lambda: NOW).unacked("CRITICAL")
+        if alert.category == "drill"
+    ]
+    assert len(drills) == 1
 
 
 def test_every_command_writes_audit_alert(tmp_path, monkeypatch):

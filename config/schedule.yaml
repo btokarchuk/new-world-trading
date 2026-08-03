@@ -1,0 +1,39 @@
+# Unattended scheduler (Phase 4b) — `nwt-risk run`, the container's main
+# process. All times are wall-clock ET and follow the exchange through DST,
+# because the market's day is defined in ET, not UTC.
+
+# 09:00: the previous session's daily bars are final by the early morning, so
+# the top-up lands before any decision reads them. Deliberately not 08:00 —
+# vendor daily bars can still be corrected in the first hours after a close.
+# A daemon started between ingest_at_et and cycle_at_et skips that day's
+# ingest (the planner is strictly forward-looking); start it before 09:00, or
+# top the bars up by hand with `make ingest-stocks`.
+ingest_at_et: "09:00"
+
+# 09:35: five minutes after the 09:30 open, so the opening auction has settled
+# and the quotes the sizer prices against are real two-sided markets rather
+# than the wide, jumpy prints of the first minutes.
+cycle_at_et: "09:35"
+
+# Fills are collected on the half hour. Orders are DAY limits, so this is
+# about applying fills to the sleeve ledgers promptly, not about chasing the
+# tape — 30 minutes keeps the books close to reality without turning the
+# broker API into a polling target.
+poll_every_min: 30
+
+# 16:05: five minutes after the 16:00 close, by which point the closing
+# auction has printed and the day's last fills are settled at the broker.
+# Skipping this poll strands fills overnight and HALTs the next morning on a
+# reconcile mismatch, so the scheduler also claims the final poll interval
+# before it if it comes up inside that window.
+eod_poll_at_et: "16:05"
+
+tz: America/New_York
+
+# Added to every heartbeat's computed next_due. The engine promises "back by
+# next_due"; without slack, a promise made for an action due in exactly 30
+# minutes leaves the watchdog declaring the engine dead over one slow broker
+# call. Two minutes is longer than any single action's worst case and far
+# shorter than a poll interval, so a genuinely wedged loop is still caught
+# well inside one cycle.
+heartbeat_grace_s: 120

@@ -1,0 +1,62 @@
+# ==========================================================================
+# nwt watchdog — the second line, running as its own process with its own
+# Alpaca key pair and no code shared with the engine.
+#
+# EVERY limit below sits deliberately WIDER than the engine's equivalent in
+# config/risk.yaml. The watchdog is not a duplicate risk system: it only fires
+# once the engine's own controls have ALREADY failed. Limits that overlapped
+# the engine's would fire together, double-halt, and train the operator to
+# ignore the one alert that means "the primary controls are gone".
+# ==========================================================================
+
+# Engine beats from inside its decision loop with a promised next_due; the
+# reconcile/poll cadence is 60s. 180s = three missed promises before the
+# watchdog acts, so a single slow API call or GC pause can never halt trading.
+heartbeat_grace_s: 180
+
+# Matches the engine's reconcile interval. Faster buys little (the engine is
+# attended) and costs Alpaca rate budget the engine needs more than we do.
+poll_interval_s: 60
+
+# Engine: rate.global_per_min 5 / global_per_day 40, max_position_count 12.
+# 15 simultaneously OPEN orders can only happen if the engine's rate limiter
+# and duplicate guard are both dead.
+max_open_orders: 15
+
+# Engine: exposure.max_gross_notional_usd 9000 (90%, permanent 10% buffer).
+# 9500 = the engine has eaten into the cash buffer it swore never to touch.
+max_gross_notional_usd: "9500"
+
+# Engine: breakers.daily_loss_usd 200 (2% => HALT). -300 (3%) means the
+# breaker did not stop it, so the watchdog stops it at the broker instead.
+daily_pnl_floor_usd: "-300"
+
+# The one limit NOT strictly wider than the engine's, and the exception is
+# deliberate: engine rate.global_per_min 5 permits 50 per 10 minutes in theory
+# while rate.global_per_day 40 caps the day, so no single ordering exists. A
+# real cycle submits a handful; 15 created inside 10 minutes is a retry storm,
+# not a strategy. Raise this if a legitimate rebalance ever approaches it.
+max_orders_per_10min: 15
+
+# Engine: drawdown_halt_pct 10.0 off a $10,000 reference => halts at $9,000.
+# 8500 (-15%) means both the drawdown breaker and the daily-loss breaker
+# failed, or somebody traded outside the engine entirely.
+equity_floor_usd: "8500"
+
+# Read-only except for one append-only HALT row in control_commands.
+risk_db: data/risk.db
+# The watchdog's OWN state: alerts and delivery attempts never touch the
+# engine's outbox, so a wedged engine cannot silence its supervisor.
+state_db: data/watchdog.db
+
+# Dead-man switch for the watchdog itself (healthchecks.io URL, no trailing
+# slash): pinged every clean cycle, pinged at /fail on any CRITICAL. Without
+# it, a dead watchdog is indistinguishable from a healthy one.
+healthcheck_url: null
+# Optional POST target for alert bodies (phone push, Slack, whatever).
+webhook_url: null
+
+# true => log the cancel it WOULD send and skip the broker call. The HALT row
+# and the alert still land: a rehearsal that exercises none of the real paths
+# proves nothing.
+dry_run: false

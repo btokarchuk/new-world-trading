@@ -17,6 +17,7 @@ members = [
     "nwt-engine",
     "nwt-research",
     "nwt-risk",
+    "nwt-watchdog",
 ]
 
 [[package]]
@@ -464,6 +465,23 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "typer", specifier = ">=0.12" },
+]
+
+[[package]]
+name = "nwt-watchdog"
+version = "0.1.0"
+source = { editable = "watchdog" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pydantic", specifier = ">=2.7" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

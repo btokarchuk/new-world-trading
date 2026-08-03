@@ -28,3 +28,5 @@ dist/
 # Xcode / iOS (populated in Phase 5)
 ios/**/xcuserdata/
 ios/**/DerivedData/
+# watchdog keys follow the same rule as every other secret
+!secrets/watchdog-*.env.example

@@ -1,4 +1,5 @@
-# Trading stack image: engine + risk + research, one image, many entrypoints.
+# Trading stack image: engine + risk + research + watchdog, one image, many
+# entrypoints (compose picks the command per service).
 #
 # Isolation intent (Phase 4): the trading code must not run with the operator's
 # full user permissions. Inside here it is a non-root user with a read-only view
@@ -27,10 +28,12 @@ COPY contracts/pyproject.toml contracts/
 COPY engine/pyproject.toml engine/
 COPY research/pyproject.toml research/
 COPY risk/pyproject.toml risk/
+COPY watchdog/pyproject.toml watchdog/
 RUN mkdir -p contracts/src/nwt_contracts engine/src/nwt_engine \
-             research/src/nwt_research risk/src/nwt_risk \
+             research/src/nwt_research risk/src/nwt_risk watchdog/src/nwt_watchdog \
     && touch contracts/src/nwt_contracts/__init__.py engine/src/nwt_engine/__init__.py \
              research/src/nwt_research/__init__.py risk/src/nwt_risk/__init__.py \
+             watchdog/src/nwt_watchdog/__init__.py \
     && uv sync --all-packages --no-dev --frozen
 
 # Source layer.
@@ -38,6 +41,7 @@ COPY contracts/ contracts/
 COPY engine/ engine/
 COPY research/ research/
 COPY risk/ risk/
+COPY watchdog/ watchdog/
 RUN uv sync --all-packages --no-dev --frozen
 
 # Non-root. uid 1000 keeps bind-mount writes sane on Linux hosts; macOS bind
@@ -48,6 +52,7 @@ RUN useradd --uid 1000 --create-home --shell /bin/bash nwt \
 USER nwt
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-# Idle by default: the container is a long-lived box we exec workflows into.
-# Phase 4b replaces this with the scheduler loop.
+# Idle by default so a bare `docker run` lands somewhere safe to exec into; the
+# real commands are set per service in docker-compose.yml (engine: `nwt-risk
+# run`, watchdog: `nwt-watchdog`).
 CMD ["sleep", "infinity"]

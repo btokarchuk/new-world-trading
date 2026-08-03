@@ -1,12 +1,13 @@
-# Attended paper stack. `make up` starts it; workflows run via `make cycle` etc.
+# Paper stack: the scheduler and the supervisor that outlives it. `make up`
+# starts both; attended workflows run via `make cycle` etc.
 #
 # Isolation posture:
 #   - code runs as non-root inside the container, never as the host user
 #   - secrets and config are mounted READ-ONLY; the container cannot rewrite
 #     its own limits or exfiltrate keys by editing files
 #   - data/ is the single writable mount (ledgers, dbs, parquet)
-#   - watchdog (Phase 4b) gets its own service and its OWN key file, so a
-#     compromised engine cannot silence its supervisor
+#   - the watchdog is a separate service with its OWN key file, so a
+#     compromised or credential-revoked engine cannot silence its supervisor
 
 name: nwt
 
@@ -31,9 +32,39 @@ services:
   engine:
     <<: *common
     container_name: nwt-engine
+    command: ["nwt-risk", "run"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import nwt_risk, nwt_engine"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # The dead-man's switch: it reads the engine's heartbeat promises and cancels
+  # at the broker directly when one is broken.
+  #
+  # OWN KEY FILE (secrets/watchdog-paper.env). Its entire job is to act when the
+  # engine IS the problem, so it must not share the engine's credentials:
+  # revoking or rate-limiting a runaway engine's key would otherwise disarm the
+  # supervisor at the exact moment it is needed, and the broker's own order log
+  # could not tell the two apart afterwards. Stated plainly, because the comment
+  # would otherwise overclaim: secrets/ is mounted into both containers, so this
+  # separates blast radius and attribution, not file access — per-file mounts
+  # are the Phase 5 hardening.
+  #
+  # NO depends_on: the watchdog has to be running precisely when the engine will
+  # not start or is crash-looping. Gating a supervisor on the health of the
+  # thing it supervises is how you end up unsupervised on the worst day.
+  watchdog:
+    <<: *common
+    container_name: nwt-watchdog
+    command: ["nwt-watchdog"]
+    env_file:
+      - ../secrets/watchdog-paper.env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import nwt_watchdog"]
       interval: 60s
       timeout: 10s
       retries: 3

@@ -5,13 +5,14 @@ description = "Personal automated-trading research platform (workspace root)"
 requires-python = ">=3.12"
 
 [tool.uv.workspace]
-members = ["contracts", "engine", "research", "risk"]
+members = ["contracts", "engine", "research", "risk", "watchdog"]
 
 [tool.uv.sources]
 nwt-contracts = { workspace = true }
 nwt-engine = { workspace = true }
 nwt-research = { workspace = true }
 nwt-risk = { workspace = true }
+nwt-watchdog = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -26,7 +27,13 @@ line-length = 100
 target-version = "py312"
 
 [tool.pytest.ini_options]
-testpaths = ["contracts/tests", "engine/tests", "research/tests", "risk/tests"]
+testpaths = [
+    "contracts/tests",
+    "engine/tests",
+    "research/tests",
+    "risk/tests",
+    "watchdog/tests",
+]
 markers = [
     "paper: contract tests against a real Alpaca paper account (manual/nightly only)",
     "network: hits live external APIs (excluded by default)",
@@ -34,7 +41,15 @@ markers = [
 addopts = "-m 'not paper and not network'"
 
 [tool.importlinter]
-root_packages = ["nwt_engine", "nwt_contracts", "nwt_risk"]
+root_packages = ["nwt_engine", "nwt_contracts", "nwt_risk", "nwt_watchdog"]
+# Required to name pandas (an external package) in the watchdog contract below.
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Watchdog shares no code with the system it supervises"
+type = "forbidden"
+source_modules = ["nwt_watchdog"]
+forbidden_modules = ["nwt_engine", "nwt_risk", "nwt_contracts", "pandas"]
 
 [[tool.importlinter.contracts]]
 name = "Strategies and sleeves never import broker adapters"
