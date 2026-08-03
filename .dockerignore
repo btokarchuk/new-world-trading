@@ -1,0 +1,13 @@
+.git
+.venv
+data
+secrets
+docs/research
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+.claude
+*.db
+*.db-wal
+*.db-shm

@@ -48,11 +48,14 @@ staleness:
   max_reconcile_age_s: 300
   max_clock_skew_s: 2
 
+# Per-sleeve caps obey the same whole-share floor as the global cap: a sleeve
+# whose max_order_usd sits below a share price can never buy that instrument.
+# Raised 2026-08-02 for sleeves that trade SPY/QQQ (~$690-750/share).
 sleeves:
-  control:     { budget_usd: "2500", max_order_usd: "500" }
-  trend_etf:   { budget_usd: "3000", max_order_usd: "500" }
-  momentum:    { budget_usd: "2000", max_order_usd: "400" }
-  mean_rev:    { budget_usd: "1000", max_order_usd: "400" }
+  control:     { budget_usd: "2500", max_order_usd: "1000" }
+  trend_etf:   { budget_usd: "3000", max_order_usd: "1000" }
+  momentum:    { budget_usd: "2000", max_order_usd: "1000" }
+  mean_rev:    { budget_usd: "1000", max_order_usd: "800" }
   crypto_momo: { budget_usd: "750",  max_order_usd: "250" }
   llm_analyst: { budget_usd: "1000", max_order_usd: "200", live_enabled: false }
 

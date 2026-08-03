@@ -121,8 +121,10 @@ def test_attended_cycles_end_to_end(stack):
     order = fake.orders[0]
     assert order["symbol"] == "SPY"
     assert order["side"] == "buy"
-    # $500 order-notional cap over a ~$100.50 limit -> at most 4-5 shares.
-    assert Decimal(order["qty"]) <= 5
+    # The $1,000 order-notional cap over a ~$100.50 limit bounds this at 9
+    # shares; the sleeve wants far more, so the clamp is what is under test.
+    assert Decimal(order["qty"]) <= 9
+    assert Decimal(order["qty"]) * Decimal(order["limit_price"]) <= Decimal("1000")
 
     # Process 3 — same day re-run: deterministic coid + target diffing means
     # no duplicate order reaches the broker.

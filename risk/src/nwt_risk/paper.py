@@ -402,15 +402,40 @@ class PaperCycle:
         Caught in the first live rehearsal (SPY at $746 vs a $500 cap).
         """
         problems: list[str] = []
-        cap = self.cfg.order.max_notional_usd
+        global_cap = self.cfg.order.max_notional_usd
         for inst in self.universe.instruments:
             if inst.fractionable:
                 continue
             price = marks.get(inst.symbol)
-            if price is not None and price > cap:
+            if price is None:
+                continue
+            if price > global_cap:
                 problems.append(
-                    f"{inst.symbol} at {price} exceeds max_notional_usd {cap}: "
-                    "one whole share is unbuyable, orders will always reject"
+                    f"{inst.symbol} at {price} exceeds order.max_notional_usd "
+                    f"{global_cap}: one whole share is unbuyable, orders always reject"
+                )
+        # Per-sleeve caps have the same floor, checked against what each sleeve
+        # can actually reach: the cheapest whole share in its own universe.
+        for spec in self.sleeve_specs:
+            budget = self.cfg.sleeves.get(spec.sleeve_id)
+            if budget is None:
+                problems.append(f"sleeve {spec.sleeve_id} has no risk budget configured")
+                continue
+            reachable = [
+                (inst.symbol, marks[inst.symbol])
+                for inst in self.universe.instruments
+                if not inst.fractionable and inst.symbol in marks
+            ]
+            unbuyable = [s for s, p in reachable if p > budget.max_order_usd]
+            if unbuyable and len(unbuyable) == len(reachable):
+                problems.append(
+                    f"sleeve {spec.sleeve_id}: max_order_usd {budget.max_order_usd} is "
+                    f"below every share price in the universe — it can never trade"
+                )
+            elif unbuyable:
+                problems.append(
+                    f"sleeve {spec.sleeve_id}: max_order_usd {budget.max_order_usd} "
+                    f"cannot buy one share of {', '.join(sorted(unbuyable))}"
                 )
         return problems
 
