@@ -31,7 +31,24 @@ poll_interval_s: 60
 # Engine: rate.global_per_min 5 / global_per_day 40, max_position_count 12.
 # 15 simultaneously OPEN orders can only happen if the engine's rate limiter
 # and duplicate guard are both dead.
-max_open_orders: 15
+# Raised from 15: with protective stops resting, ~1 open order per (sleeve,
+# symbol) lot is the PERMANENT floor, not a pile-up. 12 positions of stops +
+# a real cycle's working orders comfortably clears 30; an engine gone wrong
+# still trips it.
+max_open_orders: 30
+
+# --- unprotected-position coverage (docs/design/protective-stops.md §4.6) ---
+# Every equity share should sit behind a resting sell stop, minus allowances.
+# WARN during the calibration period; promote by flipping protection_critical
+# after two clean weeks. Crypto is exempt in code: Alpaca has no stop type
+# worth trusting there (design §7), so crypto is bounded by sleeve size.
+protection_check: true
+protection_critical: false
+protection_allowances:
+  # control's benchmark lot: rides crashes by design (owner decision 2026-08-04,
+  # design §8 row 1). UPDATE THIS if the control sleeve is ever resized — a
+  # stale allowance makes the coverage check quietly toothless for the symbol.
+  SPY: "1"
 
 # Engine: exposure.max_gross_notional_usd 9000 (90%, permanent 10% buffer).
 # 9500 = the engine has eaten into the cash buffer it swore never to touch.

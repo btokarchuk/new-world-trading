@@ -82,8 +82,7 @@ class Watchdog:
         # Paging state for repeat suppression. In-memory on purpose: a watchdog
         # restart SHOULD re-page, because a restarted supervisor cannot know
         # whether anyone saw the first alert.
-        self._last_page_reason: str | None = None
-        self._last_page_at: datetime | None = None
+        self._last_page_at_by_reason: dict[str, datetime] = {}
         # Our own last loop time. If WE also missed our cadence, the whole host
         # was suspended and the engine's late beat proves nothing.
         self._last_loop_at: datetime | None = None
@@ -118,6 +117,7 @@ class Watchdog:
         return [
             *invariants.heartbeat_overdue(self.read_heartbeat(), now, config),
             *invariants.open_order_count(open_orders, config),
+            *invariants.unprotected_positions(positions, open_orders, config),
             *invariants.gross_exposure(positions, config),
             *invariants.daily_pnl_floor(account, config),
             *invariants.order_creation_rate(recent_orders, now, config),
@@ -126,7 +126,12 @@ class Watchdog:
 
     def act(self, breaches: list[Breach]) -> None:
         for breach in [b for b in breaches if b.severity == "WARN"]:
-            self._alerts.raise_alert("WARN", breach.name, breach.detail, breach.model_dump())
+            # Same backoff discipline as the CRITICAL path: a standing WARN
+            # re-alerted every poll is 1,440 identical lines by morning.
+            if self._should_page(f"WARN:{breach.name}:{breach.detail}"):
+                self._alerts.raise_alert(
+                    "WARN", breach.name, breach.detail, breach.model_dump()
+                )
         critical = [b for b in breaches if b.severity == "CRITICAL"]
 
         # A suspend freezes supervisor and engine alike. If our own loop lost
@@ -216,18 +221,16 @@ class Watchdog:
         return bool(row and row[0])
 
     def _should_page(self, reason: str) -> bool:
-        """First occurrence pages immediately; repeats back off."""
+        """First occurrence pages immediately; repeats back off.
+
+        Keyed per reason: two different standing breaches must not reset each
+        other's clocks, or alternating breaches page every poll and the
+        backoff protects nothing.
+        """
         now = self._now()
-        if reason != self._last_page_reason:
-            self._last_page_reason = reason
-            self._last_page_at = now
-            return True
-        if self._last_page_at is None:
-            self._last_page_at = now
-            return True
-        elapsed = (now - self._last_page_at).total_seconds()
-        if elapsed >= self._page_backoff_s:
-            self._last_page_at = now
+        last = self._last_page_at_by_reason.get(reason)
+        if last is None or (now - last).total_seconds() >= self._page_backoff_s:
+            self._last_page_at_by_reason[reason] = now
             return True
         return False
 

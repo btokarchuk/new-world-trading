@@ -159,13 +159,19 @@ class StopAfter:
             self.watchdog.stop()
 
 
-def make_watchdog(tmp_path, broker, *, risk_db=None, dry_run=False, sleep_fn=None, **alert_kw):
+def make_watchdog(
+    tmp_path, broker, *, risk_db=None, dry_run=False, sleep_fn=None, config_kw=None, **alert_kw
+):
     alerts, calls = make_alerts(tmp_path, **alert_kw)
     config = WatchdogConfig(
         risk_db=risk_db if risk_db is not None else tmp_path / "data" / "risk.db",
         state_db=tmp_path / "state" / "watchdog.db",
         healthcheck_url=HEALTHCHECK,
         dry_run=dry_run,
+        # Coverage check off by default HERE ONLY (overridable): these fixtures
+        # predate protective stops and hold naked positions by construction.
+        # The detector has its own tests below with it enabled.
+        **{"protection_check": False, **(config_kw or {})},
     )
     watchdog = Watchdog(
         config, broker, lambda: NOW, alerts, **({"sleep_fn": sleep_fn} if sleep_fn else {})
@@ -459,7 +465,12 @@ def test_read_endpoints_parse_decimals_and_timestamps():
         "status": "ACTIVE",
     }
     assert broker.positions() == [
-        {"symbol": "SPY", "qty": Decimal("4"), "market_value": Decimal("-3000.10")}
+        {
+            "symbol": "SPY",
+            "asset_class": "",
+            "qty": Decimal("4"),
+            "market_value": Decimal("-3000.10"),
+        }
     ]
     order = broker.open_orders()[0]
     assert order["created_at"] == datetime(2026, 8, 3, 14, 29, 59, 123456, tzinfo=UTC)
@@ -571,3 +582,103 @@ def test_wedged_engine_still_halts_when_the_watchdog_was_running(tmp_path):
     assert broker.cancel_calls == 1
     assert len(halt_rows(risk_db)) == 1
     assert [a for a in alerts.alerts() if a["category"] == "watchdog_breach"]
+
+
+# -- unprotected-position coverage (docs/design/protective-stops.md §4.6) ----
+
+
+def _coverage(positions, orders, **config_kw):
+    from nwt_watchdog.config import WatchdogConfig
+    from nwt_watchdog.invariants import unprotected_positions
+
+    config = WatchdogConfig(
+        risk_db=Path("unused"), state_db=Path("unused"), **config_kw
+    )
+    return unprotected_positions(positions, orders, config)
+
+
+def test_naked_equity_position_warns():
+    breaches = _coverage(
+        [{"symbol": "IWM", "asset_class": "us_equity", "qty": Decimal("3")}], []
+    )
+    assert [(b.name, b.severity) for b in breaches] == [("unprotected_position", "WARN")]
+    assert "3 unprotected of 3" in breaches[0].observed
+
+
+def test_resting_sell_stops_cover_the_position():
+    breaches = _coverage(
+        [{"symbol": "IWM", "asset_class": "us_equity", "qty": Decimal("3")}],
+        [
+            {"symbol": "IWM", "side": "sell", "type": "stop", "qty": "2"},
+            {"symbol": "IWM", "side": "sell", "type": "stop", "qty": "1"},
+        ],
+    )
+    assert breaches == []
+
+
+def test_sell_limits_and_buy_stops_do_not_count_as_protection():
+    breaches = _coverage(
+        [{"symbol": "IWM", "asset_class": "us_equity", "qty": Decimal("2")}],
+        [
+            {"symbol": "IWM", "side": "sell", "type": "limit", "qty": "2"},
+            {"symbol": "IWM", "side": "buy", "type": "stop", "qty": "2"},
+        ],
+    )
+    assert len(breaches) == 1 and breaches[0].name == "unprotected_position"
+
+
+def test_allowance_excuses_the_control_lot():
+    # Owner decision (design §8 row 1): the benchmark rides crashes unprotected.
+    breaches = _coverage(
+        [{"symbol": "SPY", "asset_class": "us_equity", "qty": Decimal("1")}],
+        [],
+        protection_allowances={"SPY": "1"},
+    )
+    assert breaches == []
+
+
+def test_stale_allowance_fires_its_companion_breach():
+    # An allowance larger than the position it excuses means the config is
+    # stale and the symbol's coverage check is quietly toothless.
+    breaches = _coverage(
+        [{"symbol": "SPY", "asset_class": "us_equity", "qty": Decimal("1")}],
+        [],
+        protection_allowances={"SPY": "3"},
+    )
+    assert [b.name for b in breaches] == ["stale_protection_allowance"]
+
+
+def test_crypto_positions_are_exempt():
+    breaches = _coverage(
+        [{"symbol": "BTCUSD", "asset_class": "crypto", "qty": Decimal("0.0063")}], []
+    )
+    assert breaches == []
+
+
+def test_promotion_flag_escalates_to_critical():
+    breaches = _coverage(
+        [{"symbol": "IWM", "asset_class": "us_equity", "qty": Decimal("3")}],
+        [],
+        protection_critical=True,
+    )
+    assert breaches[0].severity == "CRITICAL"
+
+
+def test_two_standing_warns_back_off_independently(tmp_path):
+    """Alternating breaches must not reset each other's paging clocks."""
+    risk_db = tmp_path / "data" / "risk.db"
+    write_heartbeat(risk_db, NOW + timedelta(seconds=60))  # healthy heart
+    broker = FakeBroker(
+        positions=[
+            {"symbol": "EEM", "asset_class": "us_equity", "qty": "15", "market_value": "990"},
+            {"symbol": "IWM", "asset_class": "us_equity", "qty": "3", "market_value": "900"},
+        ]
+    )
+    watchdog, alerts, calls, _ = make_watchdog(
+        tmp_path, broker, config_kw={"protection_check": True}
+    )
+    for _ in range(5):
+        watchdog.act(watchdog.check())
+    warns = [a for a in alerts.alerts() if a["category"] == "unprotected_position"]
+    # one page per symbol, not one per symbol per poll
+    assert len(warns) == 2, [w["message"] for w in warns]

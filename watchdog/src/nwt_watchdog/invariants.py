@@ -166,6 +166,75 @@ def order_creation_rate(
     ]
 
 
+def unprotected_positions(
+    positions: list[dict],
+    open_orders: list[dict],
+    config: WatchdogConfig,
+) -> list[Breach]:
+    """Every share should sit behind a resting sell stop — minus allowances.
+
+    Computed from broker state alone: the broker sees ONE position per symbol
+    while sleeves see lots, so the per-sleeve view cannot be derived here
+    without reading the engine's database, which this package must never do.
+    The bridge is `protection_allowances` in config/watchdog.yaml — a static,
+    human-maintained map of shares deliberately unprotected (the control
+    sleeve's benchmark lot; crypto, where Alpaca offers no stop type worth
+    trusting). Static config preserves independence; the cost is that a stale
+    allowance makes this check quietly toothless, so a companion breach fires
+    when an allowance exceeds the position it excuses.
+
+    WARN today, by design (calibration period — see the ship-order decision in
+    docs/design/protective-stops.md §8). Promote via protection_critical once
+    the arming path has baked.
+    """
+    if not config.protection_check:
+        return []
+    severity = "CRITICAL" if config.protection_critical else "WARN"
+    breaches: list[Breach] = []
+    covered: dict[str, Decimal] = {}
+    for order in open_orders:
+        if order.get("side") == "sell" and order.get("type") == "stop":
+            symbol = order.get("symbol", "")
+            covered[symbol] = covered.get(symbol, Decimal("0")) + _dec(order.get("qty"))
+    for position in positions:
+        symbol = position.get("symbol", "")
+        if position.get("asset_class") == "crypto":
+            # Alpaca offers no stop type worth trusting for crypto (design §7);
+            # crypto exposure is bounded by sleeve size instead.
+            continue
+        qty = _dec(position.get("qty"))
+        allowance = _dec(config.protection_allowances.get(symbol, "0"))
+        if allowance > qty:
+            breaches.append(
+                Breach(
+                    name="stale_protection_allowance",
+                    severity="WARN",
+                    detail=(
+                        f"{symbol}: allowance {allowance} exceeds the position {qty} it"
+                        " excuses — config/watchdog.yaml is stale and this symbol's"
+                        " coverage check is toothless until it is corrected"
+                    ),
+                    observed=f"allowance {allowance}",
+                    limit=f"position {qty}",
+                )
+            )
+        uncovered = qty - covered.get(symbol, Decimal("0")) - allowance
+        if uncovered > 0:
+            breaches.append(
+                Breach(
+                    name="unprotected_position",
+                    severity=severity,
+                    detail=(
+                        f"{symbol}: {uncovered} share(s) with no resting sell stop —"
+                        " if the engine dies, nothing can exit this position"
+                    ),
+                    observed=f"{uncovered} unprotected of {qty}",
+                    limit="every share stopped or allowed-for",
+                )
+            )
+    return breaches
+
+
 def equity_floor(account: dict, config: WatchdogConfig) -> list[Breach]:
     equity = _dec(account.get("equity"))
     if equity > config.equity_floor_usd:

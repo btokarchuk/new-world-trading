@@ -26,6 +26,14 @@ class WatchdogConfig(BaseModel, frozen=True, extra="forbid"):
     page_backoff_s: int = 900
     poll_interval_s: int = 60
     max_open_orders: int = 15
+    # Unprotected-position coverage check (design §4 phase 6). WARN while the
+    # arming path bakes; flip protection_critical after two clean weeks.
+    protection_check: bool = True
+    protection_critical: bool = False
+    # Shares deliberately unprotected, per symbol: the control sleeve's
+    # benchmark lot rides crashes by design. Human-maintained; a companion
+    # breach fires if an allowance exceeds the position it excuses.
+    protection_allowances: dict[str, str] = {}
     max_gross_notional_usd: Decimal = Decimal("9500")
     daily_pnl_floor_usd: Decimal = Decimal("-300")
     max_orders_per_10min: int = 15

@@ -56,6 +56,11 @@ def _order(payload: dict) -> dict:
         "id": str(payload.get("id", "")),
         "symbol": payload.get("symbol", ""),
         "created_at": parse_ts(payload["created_at"]),
+        # For protection coverage: a resting protective order is a SELL with
+        # type stop; qty is what it covers.
+        "side": payload.get("side", ""),
+        "type": payload.get("type", ""),
+        "qty": payload.get("qty") or "0",
     }
 
 
@@ -90,6 +95,9 @@ class AlpacaReadOnly:
         return [
             {
                 "symbol": position.get("symbol", ""),
+                # Crypto positions report symbol WITHOUT the slash ("BTCUSD"),
+                # so asset_class is the only reliable crypto signal here.
+                "asset_class": position.get("asset_class", ""),
                 "qty": _dec(position.get("qty")),
                 "market_value": _dec(position.get("market_value")),
             }
