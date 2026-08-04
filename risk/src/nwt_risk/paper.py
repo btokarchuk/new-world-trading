@@ -509,7 +509,11 @@ class PaperCycle:
                     },
                 )
 
-        sizer = PositionSizer(self.universe)
+        # Live quotes price the orders; bars still drive the signals above.
+        sizer = PositionSizer(
+            self.universe,
+            reference_prices={s: q.last for s, q in quote_views.items()},
+        )
         intents = []
         for spec in self.sleeve_specs:
             sleeve_proposals = [p for p in proposals if p.sleeve_id == spec.sleeve_id]
@@ -738,12 +742,24 @@ class PaperCycle:
         return tuple(sessions)
 
     def _clock_skew(self, now: datetime) -> float:
+        """Clock difference with the round-trip removed.
+
+        Naively comparing the broker's timestamp to local now measures drift
+        PLUS network latency, so a slow response is indistinguishable from a
+        drifting clock — it rejected a whole cycle on 2026-08-04. Sampling
+        local time either side of the call and comparing against the midpoint
+        (the classic NTP estimate) leaves only the drift, and the residual
+        error is bounded by half the round-trip.
+        """
         clock_fn = getattr(self.broker, "clock", None)
         if clock_fn is None:
             return 0.0
         try:
+            before = self.now_fn()
             broker_clock = clock_fn()
-            return abs((broker_clock["timestamp"] - now).total_seconds())
+            after = self.now_fn()
+            midpoint = before + (after - before) / 2
+            return abs((broker_clock["timestamp"] - midpoint).total_seconds())
         except Exception:
             return 0.0
 

@@ -25,11 +25,29 @@ def _default_id_factory() -> Callable[[], str]:
 
 
 class PositionSizer:
+    """Proposals -> intents.
+
+    SIGNALS come from bars (point-in-time correct, no lookahead). EXECUTION
+    PRICES come from live quotes when there are any: pricing a limit off a
+    stale bar close guarantees a price-collar rejection after any overnight
+    gap, because the governor rightly compares the limit against the live
+    market. Observed 2026-08-04 — a weekend gap of ~3% blocked every order.
+    Backtests pass no reference prices and keep using bar closes.
+    """
+
     def __init__(
-        self, universe: Universe, id_factory: Callable[[], str] | None = None
+        self,
+        universe: Universe,
+        id_factory: Callable[[], str] | None = None,
+        reference_prices: dict[str, Decimal] | None = None,
     ) -> None:
         self._universe = universe
         self._next_id = id_factory or _default_id_factory()
+        self._reference_prices = reference_prices or {}
+
+    def _reference(self, symbol: str, history: HistoryView) -> Decimal | None:
+        live = self._reference_prices.get(symbol)
+        return live if live is not None else history.last_close(symbol)
 
     def size(
         self,
@@ -58,7 +76,7 @@ class PositionSizer:
         now: datetime,
     ) -> OrderIntent | None:
         inst = self._universe.get(target.symbol)
-        ref = history.last_close(target.symbol)
+        ref = self._reference(target.symbol, history)
         if ref is None or ref <= 0:
             return None
         marks = {s: history.last_close(s) or c for s, (q, c) in ledger.positions.items()}
@@ -95,7 +113,9 @@ class PositionSizer:
         self, proposal: Proposal, trade: Trade, history: HistoryView, now: datetime
     ) -> OrderIntent | None:
         inst = self._universe.get(trade.symbol)
-        ref = trade.limit_hint or history.last_close(trade.symbol)
+        # A strategy's limit_hint is a signal-space price; the live quote wins
+        # for execution when we have one.
+        ref = self._reference(trade.symbol, history) or trade.limit_hint
         if ref is None:
             return None
         limit = ref if inst.asset_class is not AssetClass.CRYPTO else None
