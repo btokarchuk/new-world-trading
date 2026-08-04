@@ -510,3 +510,24 @@ def test_package_never_imports_the_system_it_supervises():
         if _FORBIDDEN_IMPORT.search(path.read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+def test_standing_breach_does_not_re_page_or_re_halt_every_poll(tmp_path):
+    """Regression (2026-08-03): one overnight condition produced 315 identical
+    HALT rows and 315 CRITICALs. Cancels must keep firing while the breach
+    stands; command rows and pages must not."""
+    risk_db = tmp_path / "data" / "risk.db"
+    write_heartbeat(risk_db, NOW - timedelta(minutes=10))
+    broker = FakeBroker()
+    watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
+
+    for _ in range(6):
+        watchdog.act(watchdog.check())
+
+    assert broker.cancel_calls == 6, "cancels keep firing while the breach stands"
+    assert len(halt_rows(risk_db)) == 1, "one unconsumed HALT is enough"
+    pages = [a for a in alerts.alerts() if a["category"] == "watchdog_breach"]
+    assert len(pages) == 1, f"repeat pages must back off, got {len(pages)}"
+    # The /fail ping still goes out every poll: healthchecks.io escalation is
+    # driven by continued silence, not by how loudly we page.
+    assert len([c for c in calls if "/fail" in c[1]]) == 6

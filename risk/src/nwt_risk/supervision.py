@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS control_commands (
 );
 """
 
-Phase = Literal["idle", "waiting_session", "ingest", "cycle", "poll", "shutdown"]
+Phase = Literal[
+    "idle", "waiting_session", "ingest", "cycle", "poll", "degraded", "shutdown"
+]
 
 
 class Heartbeat(BaseModel, frozen=True):
@@ -68,15 +70,54 @@ def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_HEARTBEAT_SCHEMA)
 
 
+class DatabaseReplacedError(RuntimeError):
+    """The db file we hold open is no longer the file at our path.
+
+    A long-lived SQLite connection survives its file being replaced (rebuilds,
+    restores, a `make restart` racing a running process). The fds keep working
+    against the orphaned inode, so the process reads a frozen snapshot and
+    writes into a file nothing will ever open again: it keeps logging happily,
+    its supervisor sees a heartbeat frozen at the moment of the swap, and both
+    halves believe they are fine. Observed in the wild 2026-08-03 — 25 hours of
+    a wedged loop that Docker reported as healthy.
+
+    Writing into the void is not a condition to survive. Fail loudly and let
+    the restart policy hand us fresh file descriptors.
+    """
+
+
+def _identity(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
 class SupervisionStore:
     """Engine-side writer. The watchdog reads the same tables read-only."""
 
     def __init__(self, db_path: Path | str) -> None:
+        self.path = Path(db_path)
         self.conn = sqlite3.connect(str(db_path))
         self.conn.execute("PRAGMA journal_mode=WAL")
         init_schema(self.conn)
+        self._identity = _identity(self.path)
+
+    def assert_live_file(self) -> None:
+        """Raise if the file we have open is no longer the file at our path."""
+        current = _identity(self.path)
+        if current != self._identity:
+            raise DatabaseReplacedError(
+                f"{self.path} was replaced under a live connection "
+                f"(opened {self._identity}, now {current}); "
+                "every write since the swap went to an orphaned inode"
+            )
 
     def beat(self, now: datetime, next_due: datetime, phase: Phase, detail: str = "") -> None:
+        # Checked here because every liveness path goes through a beat: if the
+        # db was swapped, the engine must die rather than promise into a ghost.
+        self.assert_live_file()
         with self.conn:
             row = self.conn.execute("SELECT seq FROM heartbeats WHERE id = 1").fetchone()
             seq = (row[0] + 1) if row else 1

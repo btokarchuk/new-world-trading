@@ -14,6 +14,11 @@
 # watchdog acts, so a single slow API call or GC pause can never halt trading.
 heartbeat_grace_s: 180
 
+# Repeat pages for the SAME standing breach are suppressed this long.
+# Cancels still run every poll; only the paging backs off. 315 identical
+# CRITICALs for one overnight condition is how alert fatigue starts.
+page_backoff_s: 900
+
 # Matches the engine's reconcile interval. Faster buys little (the engine is
 # attended) and costs Alpaca rate budget the engine needs more than we do.
 poll_interval_s: 60

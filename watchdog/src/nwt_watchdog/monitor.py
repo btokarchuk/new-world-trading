@@ -71,6 +71,12 @@ class Watchdog:
         self._alerts = alerts
         self._sleep = sleep_fn
         self._running = False
+        # Paging state for repeat suppression. In-memory on purpose: a watchdog
+        # restart SHOULD re-page, because a restarted supervisor cannot know
+        # whether anyone saw the first alert.
+        self._last_page_reason: str | None = None
+        self._last_page_at: datetime | None = None
+        self._page_backoff_s = float(getattr(config, "page_backoff_s", 900))
 
     def read_heartbeat(self) -> dict | None:
         """Read-only URI so a watchdog bug cannot corrupt the engine's state.
@@ -114,25 +120,67 @@ class Watchdog:
         if not critical:
             self._alerts.ping_ok()
             return
-        # Repeats every poll for as long as the breach stands, by design: an
-        # engine wedged badly enough to keep submitting must keep getting
-        # cancelled, and suppressing the repeat means guessing which one was
-        # safe to drop. Duplicate HALT rows are cheap; a skipped cancel is not.
+        # Cancel every poll while the breach stands — an engine wedged badly
+        # enough to keep submitting must keep getting cancelled, and choosing
+        # which repeat is safe to drop is guesswork.
+        #
+        # But do NOT re-issue a HALT that is still sitting unconsumed, and do
+        # not re-page on every poll: one condition produced 315 identical
+        # commands and 315 CRITICALs overnight on 2026-08-03. An alert channel
+        # that cries 315 times for one fact trains its reader to ignore it, and
+        # the 315th HALT row tells the engine nothing the 1st did not.
         reason = _reason(critical)
         cancel = self._cancel()
-        command_id = self._issue_halt(reason)
-        self._alerts.raise_alert(
-            "CRITICAL",
-            "watchdog_breach",
-            reason,
-            {
-                "breaches": [b.model_dump() for b in critical],
-                "dry_run": self._config.dry_run,
-                "cancel": cancel,
-                "halt_command_id": command_id,
-            },
-        )
+        command_id = None
+        if not self._halt_outstanding():
+            command_id = self._issue_halt(reason)
+        if self._should_page(reason):
+            self._alerts.raise_alert(
+                "CRITICAL",
+                "watchdog_breach",
+                reason,
+                {
+                    "breaches": [b.model_dump() for b in critical],
+                    "dry_run": self._config.dry_run,
+                    "cancel": cancel,
+                    "halt_command_id": command_id,
+                    "repeat_suppressed_until_s": self._page_backoff_s,
+                },
+            )
         self._alerts.ping_fail(reason)
+
+    def _halt_outstanding(self) -> bool:
+        """True when a HALT we already issued has not been consumed yet."""
+        try:
+            conn = sqlite3.connect(
+                f"file:{self._config.risk_db}?mode=ro", uri=True, timeout=5
+            )
+            try:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM control_commands"
+                    " WHERE consumed = 0 AND issuer = 'watchdog'"
+                ).fetchone()
+            finally:
+                conn.close()
+        except Exception:
+            return False  # unreadable => assume none, erring toward acting
+        return bool(row and row[0])
+
+    def _should_page(self, reason: str) -> bool:
+        """First occurrence pages immediately; repeats back off."""
+        now = self._now()
+        if reason != self._last_page_reason:
+            self._last_page_reason = reason
+            self._last_page_at = now
+            return True
+        if self._last_page_at is None:
+            self._last_page_at = now
+            return True
+        elapsed = (now - self._last_page_at).total_seconds()
+        if elapsed >= self._page_backoff_s:
+            self._last_page_at = now
+            return True
+        return False
 
     def run_forever(self) -> None:
         self._running = True

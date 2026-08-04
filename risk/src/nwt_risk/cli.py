@@ -192,6 +192,41 @@ def status(
 
 
 @app.command()
+def healthcheck(
+    db: Path = _DB_OPT,
+) -> None:
+    """Exit nonzero when the engine's own promise is overdue.
+
+    The container healthcheck used to be `python -c "import nwt_risk"`, which
+    reported healthy through 25 hours of a wedged loop (2026-08-03). Liveness
+    is the heartbeat or it is nothing.
+    """
+    from .supervision import SupervisionStore
+
+    if not db.exists():
+        typer.echo("unhealthy: no supervision db", err=True)
+        raise typer.Exit(1)
+    store = SupervisionStore(db)
+    try:
+        store.assert_live_file()
+    except Exception as exc:
+        typer.echo(f"unhealthy: {exc}", err=True)
+        raise typer.Exit(1)
+    beat = store.last_beat()
+    if beat is None:
+        typer.echo("unhealthy: engine has never beaten", err=True)
+        raise typer.Exit(1)
+    late = beat.overdue_by(_now()).total_seconds()
+    if late > 0:
+        typer.echo(
+            f"unhealthy: beat seq {beat.seq} ({beat.phase}) overdue by {late:.0f}s",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(f"healthy: seq {beat.seq} {beat.phase}, {abs(late):.0f}s of slack")
+
+
+@app.command()
 def kill(
     db: Path = _DB_OPT,
     config: Path = _CONFIG_OPT,

@@ -408,3 +408,42 @@ def test_schedule_config_loads_and_refuses_incoherent_files(tmp_path):
 def test_repo_schedule_yaml_matches_the_shipped_defaults():
     cfg = ScheduleConfig.load(Path(__file__).parents[2] / "config" / "schedule.yaml")
     assert cfg == ScheduleConfig()
+
+
+def test_ghost_database_is_fatal_not_survivable(tmp_path):
+    """Regression (2026-08-03): a `make restart` racing a live process left the
+    scheduler holding deleted WAL fds. It kept logging, kept 'working', and
+    wrote every beat into an orphaned inode while its supervisor watched a
+    frozen heartbeat. Writing into the void must kill the process."""
+    from datetime import UTC, datetime
+
+    from nwt_risk.supervision import DatabaseReplacedError, SupervisionStore
+
+    db = tmp_path / "risk.db"
+    store = SupervisionStore(db)
+    now = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
+    store.beat(now, now + timedelta(minutes=30), "idle", "fine")
+    assert store.last_beat().seq == 1
+
+    # Someone replaces the file under us (rebuild, restore, restart race).
+    db.unlink()
+    SupervisionStore(db).beat(now, now + timedelta(minutes=30), "idle", "new file")
+
+    with pytest.raises(DatabaseReplacedError):
+        store.beat(now, now + timedelta(minutes=30), "idle", "into the void")
+
+
+def test_failed_action_still_beats_as_degraded(harness):
+    """An engine that cannot reach the broker is impaired, not dead — and the
+    difference matters: during a network outage the watchdog's cancel would
+    fail too, so it must not treat 'blind' as 'gone'."""
+    harn = harness(_et(_MON, "09:36"))
+    harn.arm()
+
+    before = harn.scheduler.supervision.last_beat()
+    harn.scheduler._on_failure("poll", RuntimeError("broker down"))
+    after = harn.scheduler.supervision.last_beat()
+
+    assert after.seq > (before.seq if before else 0)
+    assert after.phase == "degraded"
+    assert after.next_due > after.ts  # still promising to come back

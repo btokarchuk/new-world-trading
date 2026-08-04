@@ -34,8 +34,10 @@ services:
     container_name: nwt-engine
     command: ["nwt-risk", "run"]
     restart: unless-stopped
+    # Liveness is the heartbeat, not an import: the old import check reported
+    # healthy through 25 hours of a wedged loop (2026-08-03).
     healthcheck:
-      test: ["CMD", "python", "-c", "import nwt_risk, nwt_engine"]
+      test: ["CMD", "nwt-risk", "healthcheck", "--db", "/app/data/risk.db"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -64,6 +66,8 @@ services:
       - ../secrets/watchdog-paper.env
     restart: unless-stopped
     healthcheck:
+      # The watchdog has no heartbeat of its own to check (it IS the check);
+      # an import probe at least catches a broken image or a crash-loop.
       test: ["CMD", "python", "-c", "import nwt_watchdog"]
       interval: 60s
       timeout: 10s

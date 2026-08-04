@@ -39,7 +39,7 @@ from .config import RiskConfig
 from .paper import PaperConfig, PaperCycle, build_paper_cycle
 from .reasons import ReasonCode
 from .state import TradingStateMachine
-from .supervision import Phase, SupervisionStore
+from .supervision import DatabaseReplacedError, Phase, SupervisionStore
 
 Action = Literal["ingest", "cycle", "poll", "wait"]
 
@@ -394,6 +394,12 @@ class Scheduler:
     def _beat(self, next_due: datetime, phase: Phase, detail: str) -> None:
         self.supervision.beat(self.now_fn(), next_due + self._grace, phase, detail[:200])
 
+    def _beat_raw(
+        self, now: datetime, next_due: datetime, phase: Phase, detail: str
+    ) -> None:
+        """Beat with an explicit next_due (grace already included)."""
+        self.supervision.beat(now, next_due, phase, detail[:200])
+
     def _note_halt_skip(self, action: Action) -> None:
         self._log(f"{action}: skipped — HALTED")
         if self._halt_noted:
@@ -408,6 +414,8 @@ class Scheduler:
         )
 
     def _on_failure(self, action: str, exc: Exception) -> None:
+        if isinstance(exc, DatabaseReplacedError):
+            raise exc  # never survivable: we are writing into an orphaned inode
         count = self._failures.get(action, 0) + 1
         self._failures[action] = count
         message = f"{action} failed ({count}/{_MAX_FAILURES}): {type(exc).__name__}: {exc}"
@@ -418,6 +426,22 @@ class Scheduler:
             {"action": action, "error": repr(exc), "consecutive": count},
         )
         self._log(message)
+        # An impaired engine must still keep its promise, flagged degraded: a
+        # network outage looks exactly like a wedged loop to a supervisor that
+        # only sees silence, and during an outage the watchdog's cancel would
+        # fail anyway. Alive-but-blind and gone deserve different responses.
+        try:
+            now = self.now_fn()
+            self._beat_raw(
+                now,
+                now + timedelta(seconds=self._max_sleep_s) + self._grace,
+                "degraded",
+                f"{action} failing ({count}/{_MAX_FAILURES}): {type(exc).__name__}",
+            )
+        except DatabaseReplacedError:
+            raise
+        except Exception:
+            pass  # the failure path must not fail
         if count < _MAX_FAILURES:
             return
         self._failures[action] = 0

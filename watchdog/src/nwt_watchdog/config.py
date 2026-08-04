@@ -19,6 +19,11 @@ class WatchdogConfig(BaseModel, frozen=True, extra="forbid"):
     # in force — a watchdog running limits the operator did not write is worse
     # than one that refuses to start.
     heartbeat_grace_s: int = 180
+    # Repeat CRITICALs for the SAME standing breach are suppressed for this
+    # long. One condition produced 315 identical pages overnight on
+    # 2026-08-03; an alert that repeats every minute is an alert you learn to
+    # ignore. Cancels still run every poll — only the paging backs off.
+    page_backoff_s: int = 900
     poll_interval_s: int = 60
     max_open_orders: int = 15
     max_gross_notional_usd: Decimal = Decimal("9500")
