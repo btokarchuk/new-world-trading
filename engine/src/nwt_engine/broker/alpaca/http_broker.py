@@ -96,6 +96,10 @@ def _error_message(response: httpx.Response) -> str:
     return response.text
 
 
+class BrokerError(RuntimeError):
+    """A broker operation failed in a way the caller must not ignore."""
+
+
 class AlpacaHttpBroker(Broker):
     def __init__(
         self,
@@ -148,8 +152,28 @@ class AlpacaHttpBroker(Broker):
         if deletion.status_code != 404:  # 404 = reached terminal state in the race
             deletion.raise_for_status()
 
-    def cancel_all(self) -> None:
-        self._request("DELETE", "/v2/orders").raise_for_status()
+    def cancel_all(self) -> list[dict]:
+        """Cancel everything; report per-order outcomes.
+
+        DELETE /v2/orders returns 207 multi-status. 207 is 2xx, so
+        raise_for_status() alone lets per-item failures ("order no longer
+        cancelable") pass silently — and once protective stops rest, the kill
+        switch must be able to say whether the stops actually died. Returns
+        the per-order status list; entries with status >= 300 failed.
+        """
+        response = self._request("DELETE", "/v2/orders")
+        response.raise_for_status()
+        try:
+            items = response.json()
+        except ValueError:
+            return []
+        failures = [i for i in items if int(i.get("status", 500)) >= 300]
+        if failures:
+            ids = ", ".join(str(i.get("id", "?")) for i in failures[:5])
+            raise BrokerError(
+                f"cancel_all: {len(failures)}/{len(items)} cancels failed ({ids})"
+            )
+        return items
 
     def get_open_orders(self) -> list[OrderStatus]:
         response = self._request("GET", "/v2/orders", params={"status": "open", "limit": 500})

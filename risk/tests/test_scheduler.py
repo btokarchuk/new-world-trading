@@ -187,7 +187,9 @@ _WEEK = [
     (_et(_MON, "07:00"), "ingest", _et(_MON, "09:00")),
     (_et(_MON, "08:59"), "ingest", _et(_MON, "09:00")),
     # Between ingest and cycle (still pre-open): the cycle is next.
-    (_et(_MON, "09:05"), "cycle", _et(_MON, "09:35")),
+    # Closed, open later today: collect the opening auction's fills (a resting
+    # stop may have fired at 09:30) before the 09:35 decision cycle.
+    (_et(_MON, "09:05"), "poll", _et(_MON, "09:31")),
     (_et(_MON, "09:31"), "cycle", _et(_MON, "09:35")),
     # Mid-session: poll on the next 30-minute boundary.
     (_et(_MON, "09:36"), "poll", _et(_MON, "10:00")),
@@ -252,7 +254,7 @@ def test_run_forever_walks_a_session_and_beats_a_promise(harness):
         harn.scheduler.run_forever()
 
     assert harn.ingests == 1
-    assert harn.actions()[:3] == ["ingest", "cycle", "poll"]
+    assert harn.actions()[:3] == ["ingest", "poll", "cycle"]  # open-poll first
     assert harn.actions().count("poll") >= 2
     assert harn.state.state() is TradingState.ACTIVE
 

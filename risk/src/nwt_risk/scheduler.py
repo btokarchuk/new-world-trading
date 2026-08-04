@@ -241,6 +241,13 @@ class Scheduler:
         if next_open.date() == et.date():
             if et < ingest_at:
                 return ("ingest", ingest_at)
+            # Collect the opening auction's fills BEFORE the decision cycle. A
+            # resting GTC stop that fires at 09:30 moves the broker's book; a
+            # 09:35 cycle that reconciled without polling first would read that
+            # honest gap as a mismatch and HALT. Harmless when nothing rests.
+            open_poll_at = next_open + timedelta(minutes=1)
+            if et < open_poll_at < cycle_at:
+                return ("poll", open_poll_at)
             if et < cycle_at:
                 return ("cycle", cycle_at)
             # Late or half-day open past the nominal cycle time: decide at the

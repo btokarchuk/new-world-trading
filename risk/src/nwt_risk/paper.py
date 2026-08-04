@@ -209,7 +209,11 @@ class PaperStore:
         is_entry: bool,
     ) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO paper_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            # Explicit columns: a bare VALUES list silently corrupts the row
+            # the day the schema gains a column (protective stops will add three).
+            "INSERT OR REPLACE INTO paper_orders (client_order_id, sleeve_or_net,"
+            " net_plan_json, symbol, side, qty, notional, limit_price,"
+            " submitted_ts, state, is_entry) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 coid,
                 sleeve_or_net,
@@ -444,6 +448,14 @@ class PaperCycle:
         notes: list[str] = []
         ledgers = self.store.fold_ledgers(self.sleeve_specs)
 
+        # Poll BEFORE reconciling. A fill that lands between cycles (today: a
+        # partial from yesterday; soon: a resting GTC stop firing overnight)
+        # moves the broker's book but not ours — reconciling first sees that
+        # honest gap as a mismatch, HALTs, and the early-return strands the
+        # fill forever. Collect what the broker already did, then judge.
+        # (Scheduler._collect_and_reconcile has always done it in this order.)
+        self.poll_fills(ledgers)
+
         reconciled = self.reconcile_and_arm(ledgers)
         if not reconciled:
             return CycleReport(
@@ -458,8 +470,6 @@ class PaperCycle:
                 crosses_executed=0,
                 notes=("reconciliation failed — HALTED",),
             )
-
-        self.poll_fills(ledgers)
         account = self.broker.get_account()
         day_open = self.store.day_open(now.date().isoformat(), account.equity)
         self.breakers.observe(
