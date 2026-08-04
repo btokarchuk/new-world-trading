@@ -24,6 +24,8 @@ the startup handshake below, which reconciles once at boot so a restarted
 daemon resumes when the operator's arming intent survived.
 """
 
+import signal
+from contextlib import contextmanager
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from time import sleep
@@ -49,6 +51,61 @@ _PHASE: dict[Action, Phase] = {
     "poll": "poll",
     "wait": "waiting_session",
 }
+
+class StepTimeout(RuntimeError):
+    """A loop step blew its deadline. Deliberately fatal.
+
+    A wedged engine is worse than a dead one: it keeps its container "up",
+    keeps its logs plausible, and stops beating — so the supervisor cancels
+    orders and issues a HALT that the wedged process can never consume.
+    Observed 2026-08-04: a scheduler blocked mid-request on a socket the peer
+    had already closed, silent for 18 minutes with the market open.
+
+    Docker's healthcheck reports unhealthy but does not restart anything, so
+    the process has to end itself. Dying gives `restart: unless-stopped` fresh
+    file descriptors, a fresh connection pool, and a startup handshake that
+    honours whatever the watchdog demanded while we were gone.
+    """
+
+
+# Per-step budgets. Generous — these are "obviously hung", not "slow today".
+# The long sleeps between steps are deliberately NOT covered: waiting overnight
+# is the loop working correctly.
+_STEP_BUDGET_S: dict[str, float] = {
+    "plan": 120.0,     # one clock call
+    "poll": 300.0,     # fills + reconcile
+    "cycle": 600.0,    # strategies + governor + submissions
+    "ingest": 900.0,   # a full universe of bars
+    "startup": 600.0,
+    "commands": 60.0,
+}
+_DEFAULT_STEP_BUDGET_S = 300.0
+
+
+@contextmanager
+def _deadline(label: str, on_expiry: Callable[[str, float], None]):
+    """SIGALRM fence around one blocking step.
+
+    Main-thread/Unix only, which is exactly where the daemon runs. Nested use
+    is avoided by fencing whole steps rather than inner calls.
+    """
+    budget = _STEP_BUDGET_S.get(label, _DEFAULT_STEP_BUDGET_S)
+    if not hasattr(signal, "SIGALRM"):  # pragma: no cover - non-Unix
+        yield
+        return
+
+    def _fire(_signum, _frame):
+        on_expiry(label, budget)
+        raise StepTimeout(f"step {label!r} exceeded {budget:.0f}s — aborting the process")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, budget)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
 
 _MAX_FAILURES = 3
 _CLOCK_RETRY_S = 60.0
@@ -229,11 +286,15 @@ class Scheduler:
         calendar says. Returns the next (action, time), which is what the
         closing heartbeat promises.
         """
-        self._honour_commands()
-        action, at = self._plan()
-        self._wait_for(action, at)
-        self._execute(action)
-        next_action, next_at = self._plan()
+        with _deadline("commands", self._on_step_timeout):
+            self._honour_commands()
+        with _deadline("plan", self._on_step_timeout):
+            action, at = self._plan()
+        self._wait_for(action, at)  # deliberately unfenced: waiting IS the job
+        with _deadline(action, self._on_step_timeout):
+            self._execute(action)
+        with _deadline("plan", self._on_step_timeout):
+            next_action, next_at = self._plan()
         self._beat(next_at, _PHASE[next_action], f"next {next_action} at {next_at.isoformat()}")
         # The daemon is the only thing driving outbox retries once the operator
         # stops running CLI commands.
@@ -413,9 +474,25 @@ class Scheduler:
             {"action": action},
         )
 
+    def _on_step_timeout(self, label: str, budget: float) -> None:
+        """Last words. The alert must land before the exception unwinds us."""
+        message = (
+            f"scheduler ABORTING: step {label!r} exceeded {budget:.0f}s. A wedged"
+            " loop cannot honour a HALT, so the process ends and restarts clean."
+        )
+        try:
+            self._log(message)
+            self.alerts.raise_alert(
+                "EMERGENCY", "scheduler", message, {"step": label, "budget_s": budget}
+            )
+            now = self.now_fn()
+            self._beat_raw(now, now, "degraded", f"aborting: {label} timed out")
+        except Exception:
+            pass  # dying loudly beats dying silently, but die either way
+
     def _on_failure(self, action: str, exc: Exception) -> None:
-        if isinstance(exc, DatabaseReplacedError):
-            raise exc  # never survivable: we are writing into an orphaned inode
+        if isinstance(exc, (DatabaseReplacedError, StepTimeout)):
+            raise exc  # never survivable: ghost db, or a step that hung
         count = self._failures.get(action, 0) + 1
         self._failures[action] = count
         message = f"{action} failed ({count}/{_MAX_FAILURES}): {type(exc).__name__}: {exc}"

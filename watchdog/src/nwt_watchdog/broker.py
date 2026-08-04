@@ -23,6 +23,12 @@ PAPER_URL = "https://paper-api.alpaca.markets"
 LIVE_URL = "https://api.alpaca.markets"
 
 _TIMEOUT_S = 10.0
+# Our cadence is minutes-to-hours between calls, so a pooled connection is
+# always idle long enough to go stale — and after a host suspend the peer has
+# usually closed it while we still think it is live (observed 2026-08-04: an
+# fd in CLOSE_WAIT and a scheduler wedged mid-request). Expiring keep-alives
+# aggressively costs one handshake per call and buys a fresh socket every time.
+_KEEPALIVE_EXPIRY_S = 15.0
 _PAGE_LIMIT = 500
 
 
@@ -63,7 +69,10 @@ class AlpacaReadOnly:
     ) -> None:
         self._base = base_url.rstrip("/")
         self._headers = {"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret}
-        self._client = client or httpx.Client(timeout=_TIMEOUT_S)
+        self._client = client or httpx.Client(
+            timeout=_TIMEOUT_S,
+            limits=httpx.Limits(keepalive_expiry=_KEEPALIVE_EXPIRY_S),
+        )
 
     def account(self) -> dict:
         payload = self._get("/v2/account")

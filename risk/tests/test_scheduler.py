@@ -447,3 +447,56 @@ def test_failed_action_still_beats_as_degraded(harness):
     assert after.seq > (before.seq if before else 0)
     assert after.phase == "degraded"
     assert after.next_due > after.ts  # still promising to come back
+
+
+def test_a_hung_step_aborts_the_process_instead_of_going_silent(harness):
+    """Regression (2026-08-04): the scheduler blocked mid-request on a socket
+    the peer had already closed and went silent for 18 minutes with the market
+    open. Its container stayed 'up', its logs stayed plausible, and the HALT
+    the watchdog issued could never be consumed by a wedged process.
+
+    A hang must end the process so the restart policy can hand it a clean
+    connection pool and a startup handshake that honours pending commands."""
+    import signal
+
+    import time as _time
+
+    from nwt_risk.scheduler import StepTimeout, _deadline
+
+    fired: list[tuple[str, float]] = []
+
+    if not hasattr(signal, "SIGALRM"):
+        pytest.skip("SIGALRM is Unix-only")
+
+    # Budget is per-step; force a tiny one by patching the table for this test.
+    from nwt_risk import scheduler as sched
+
+    original = sched._STEP_BUDGET_S.get("plan")
+    sched._STEP_BUDGET_S["plan"] = 0.05
+    try:
+        with pytest.raises(StepTimeout):
+            with _deadline("plan", lambda label, budget: fired.append((label, budget))):
+                _time.sleep(1.0)
+    finally:
+        if original is None:
+            sched._STEP_BUDGET_S.pop("plan", None)
+        else:
+            sched._STEP_BUDGET_S["plan"] = original
+
+    assert fired == [("plan", 0.05)], "the reason must be recorded before we die"
+
+
+def test_a_step_that_finishes_in_time_disarms_its_deadline(harness):
+    """The fence must not leave an armed timer behind — a stray SIGALRM during
+    the next overnight sleep would abort a perfectly healthy engine."""
+    import signal
+
+    from nwt_risk.scheduler import _deadline
+
+    if not hasattr(signal, "SIGALRM"):
+        pytest.skip("SIGALRM is Unix-only")
+
+    with _deadline("plan", lambda label, budget: None):
+        pass
+    remaining, _ = signal.getitimer(signal.ITIMER_REAL)
+    assert remaining == 0.0, "deadline left armed after a successful step"
