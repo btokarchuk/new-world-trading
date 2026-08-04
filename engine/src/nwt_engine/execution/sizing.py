@@ -24,6 +24,20 @@ def _default_id_factory() -> Callable[[], str]:
     return lambda: f"intent-{next(counter)}"
 
 
+def _floor_to_increment(qty: Decimal, increment: Decimal) -> Decimal:
+    """Round DOWN to a tradeable step — whole shares, or a crypto lot.
+
+    Equities use increment 1 (whole shares). Crypto uses Alpaca's 0.0001
+    minimum increment: flooring a $750 BTC target to whole units pinned the
+    crypto sleeve at zero, which is why it never deployed. Always ROUND_DOWN so
+    sizing can never exceed the target weight.
+    """
+    if increment <= 0:
+        return qty.to_integral_value(rounding=ROUND_DOWN)
+    steps = (qty / increment).to_integral_value(rounding=ROUND_DOWN)
+    return (steps * increment).normalize()
+
+
 class PositionSizer:
     """Proposals -> intents.
 
@@ -85,8 +99,8 @@ class PositionSizer:
         # Size against the worst-case fill price (the buy limit), so a full-weight
         # target is always affordable even if the order fills at the limit.
         buy_limit = (ref * (1 + _LIMIT_BUFFER)).quantize(inst.tick_size)
-        desired_qty = (target.weight * equity / buy_limit).to_integral_value(
-            rounding=ROUND_DOWN
+        desired_qty = _floor_to_increment(
+            target.weight * equity / buy_limit, inst.qty_increment
         )
         delta = desired_qty - current
         if delta == 0 or abs(delta) * ref < _MIN_TRADE_NOTIONAL:

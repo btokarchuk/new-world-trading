@@ -6,8 +6,14 @@ instruments:
     calendar: "24_7"
     tick_size: "0.01"
     fractionable: true
+    # Alpaca crypto minimum order size AND increment (docs: crypto-trading).
+    qty_increment: "0.0001"
+    # Crypto rejects `day`; gtc/ioc only. 24/7 markets have no close to expire at.
+    tif: "gtc"
   - symbol: ETH/USD
     asset_class: crypto
     calendar: "24_7"
     tick_size: "0.01"
     fractionable: true
+    qty_increment: "0.0001"
+    tif: "gtc"

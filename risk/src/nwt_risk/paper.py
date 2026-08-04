@@ -697,7 +697,10 @@ class PaperCycle:
             qty=qty,
             notional=notional,
             limit_price=limit_price,
-            tif="day",
+            # Per-instrument: `day` for equities (nothing survives the close,
+            # which bounds the unattended surface), `gtc` for crypto — Alpaca
+            # rejects `day` on a 24/7 market that never has a close to expire at.
+            tif=self.universe.get(symbol).tif,
         )
         self.store.record_order(
             coid, sleeve_or_net, plan, symbol, side, qty, notional, limit_price, now, is_entry

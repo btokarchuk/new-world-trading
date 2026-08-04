@@ -56,7 +56,9 @@ class OrderTicket(BaseModel, frozen=True):
     qty: Decimal | None = None
     notional: Decimal | None = None
     limit_price: Decimal | None = None   # None = notional market flow (crypto/DI only)
-    tif: Literal["day", "ioc"] = "day"
+    # `day` for equities (bounds unattended surface: nothing survives the close).
+    # Crypto trades 24/7 and Alpaca rejects `day` for it, so crypto uses gtc.
+    tif: Literal["day", "ioc", "gtc"] = "day"
 
     @model_validator(mode="after")
     def _qty_xor_notional(self) -> "OrderTicket":
