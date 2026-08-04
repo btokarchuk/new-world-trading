@@ -19,5 +19,12 @@
     "order_status": "pending_new",
     "id": "7551133f-3478-48d9-b55e-2bb2c452c2fa",
     "error": null
+  },
+  {
+    "probe": "prot-probe-eem-d",
+    "status": 200,
+    "order_status": "accepted",
+    "id": "c5007b4a-29d2-4fdd-bb43-6218b21790b8",
+    "error": null
   }
 ]
