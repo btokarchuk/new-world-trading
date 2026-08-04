@@ -143,13 +143,85 @@ def _audit_command(outbox: AlertOutbox, command: str) -> None:
     )
 
 
-def _echo_latches(latches: list) -> None:
+# Plain-English gloss per breaker. The latch text says what tripped in machine
+# terms; an operator deciding whether to resume needs to know what it MEANS and
+# what would make acking it a mistake. Explainability is not optional here: if
+# the only person who can un-halt the system cannot read the reason, the
+# interlock is theatre.
+_LATCH_GUIDE: dict[str, tuple[str, str]] = {
+    "startup": (
+        "Every process start lands HALTED until it has reconciled against the"
+        " broker. Routine.",
+        "Safe to ack once reconciliation passed.",
+    ),
+    "watchdog": (
+        "The supervisor stopped hearing from the engine and cancelled orders."
+        " Either the engine wedged, or the host was suspended and nobody was"
+        " running.",
+        "Ack only if you know which. A wedged engine that you resume without"
+        " diagnosing will wedge again.",
+    ),
+    "kill_switch": (
+        "An operator pressed the panic button. Orders were cancelled; any open"
+        " positions lost their bracket protection with them.",
+        "Re-protect or flatten before resuming.",
+    ),
+    "reconcile_mismatch": (
+        "The broker's cash or positions disagreed with our ledgers beyond"
+        " tolerance. Somebody traded outside the system, or our books are wrong.",
+        "DO NOT ack until the difference is explained. Resuming on wrong books"
+        " means every subsequent decision is sized off a lie.",
+    ),
+    "daily_loss": (
+        "Losses hit the daily limit.",
+        "Ack when you have decided the loss was strategy variance rather than a"
+        " defect.",
+    ),
+    "drawdown_warn": (
+        "Equity fell below the drawdown warning band from its high-water mark.",
+        "Ack to resume entries; consider whether the thesis still holds.",
+    ),
+    "drawdown_halt": (
+        "Equity fell past the hard drawdown limit.",
+        "The plan calls for a written post-mortem before this one is acked.",
+    ),
+    "consecutive_losses": (
+        "A run of losing round trips tripped the streak breaker.",
+        "Cools off on its own; ack early only if you have a reason.",
+    ),
+    "rejection_storm": (
+        "The broker rejected repeated orders — our model of the account is"
+        " probably wrong.",
+        "Find out why before resuming, or the storm resumes with you.",
+    ),
+    "scheduler": (
+        "The scheduler failed the same action three times running.",
+        "Check the logs for the underlying failure first.",
+    ),
+}
+
+
+def _explain_latch(latch) -> tuple[str, str]:
+    return _LATCH_GUIDE.get(
+        latch.breaker,
+        ("No guidance recorded for this breaker.", "Investigate before acking."),
+    )
+
+
+def _echo_latches(latches: list, explain: bool = False) -> None:
     typer.echo(f"un-acked latches ({len(latches)}):")
     for latch in latches:
         typer.echo(
             f"  [{latch.latch_id:>3}] {latch.breaker:<20} {latch.reason.value:<20}"
             f" {latch.detail}"
         )
+        if not explain:
+            continue
+        meaning, guidance = _explain_latch(latch)
+        typer.echo(f"        tripped at: {latch.ts.isoformat()}")
+        typer.echo(f"        what it means: {meaning}")
+        typer.echo(f"        before acking: {guidance}")
+        typer.echo("")
 
 
 @app.command()
@@ -189,6 +261,30 @@ def status(
     typer.echo(f"{'cash':>13}: {account.cash}")
     typer.echo(f"{'equity':>13}: {account.equity}")
     typer.echo(f"{'open orders':>13}: {len(broker.get_open_orders())}")
+
+
+@app.command()
+def latches(
+    db: Path = _DB_OPT,
+    env: str = _ENV_OPT,
+) -> None:
+    """Explain every un-acked latch: what tripped, what it means, what to check.
+
+    Acking a latch is a signature: "I read this, I understand it, I accept
+    responsibility for resuming." That signature is worthless if the reason is
+    only legible to whoever wrote the breaker.
+    """
+    env = _check_env(env)
+    machine, _outbox = _open(db, env)
+    record = machine.current()
+    unacked = [latch for latch in record.latches if not latch.acked]
+    typer.echo(f"state: {record.state.value}\n")
+    if not unacked:
+        typer.echo("no un-acked latches — nothing is blocking a resume")
+        return
+    _echo_latches(unacked, explain=True)
+    ids = " ".join(f"--ack {latch.latch_id}" for latch in unacked)
+    typer.echo(f"to resume once you accept all of the above:\n  nwt-risk resume --to ACTIVE {ids}")
 
 
 @app.command()

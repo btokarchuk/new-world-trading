@@ -31,7 +31,7 @@ export NWT_CA_CERT := /certs/$(notdir $(SSL_CERT_FILE))
 endif
 
 .PHONY: help build up down restart shell logs watchdog-logs ps beat status cycle \
-        poll resume kill flatten drill ingest-stocks ingest-crypto backtest test lint
+        poll resume kill flatten drill latches ingest-stocks ingest-crypto backtest test lint
 
 # Heartbeats are a PROMISE (next_due), so "alive" is decidable without knowing
 # the trading calendar: a beat is late or it is not.
@@ -99,6 +99,9 @@ shell: ## Interactive shell inside the box
 beat: ## Last heartbeat + pending control commands (is the engine alive?)
 	@$(EXEC_WATCHDOG) python -c "$$BEAT_PY" $(BEAT_DB)
 
+latches: ## Explain un-acked latches: what tripped, and what to check first
+	$(EXEC) nwt-risk latches
+
 status: ## Risk state, latches, alerts, broker account
 	$(EXEC) nwt-risk status
 
@@ -108,8 +111,12 @@ cycle: ## Attended cycle now (the scheduler runs these on its own)
 poll: ## Attended fill collection + re-verify the books
 	$(EXEC) nwt-risk poll
 
-resume: ## Arm the state machine (interactive: typed phrase required)
-	$(EXEC_TTY) nwt-risk resume --to ACTIVE $(ACK)
+# Latch ids stay explicit — acking each one is meant to be a conscious act of
+# reading it, not a bulk dismissal. This only spares you the --ack repetition:
+#   make resume ACK=12        or   make resume ACK="12 13"
+resume: ## Arm the state machine (ACK=<latch ids>; interactive phrase required)
+	$(EXEC_TTY) nwt-risk resume --to ACTIVE \
+	  $(foreach id,$(ACK),$(if $(filter --ack,$(id)),,--ack $(id)))
 
 kill: ## PANIC: cancel all orders + HALT (no confirmation, by design)
 	$(EXEC) nwt-risk kill
