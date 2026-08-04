@@ -208,20 +208,55 @@ def _explain_latch(latch) -> tuple[str, str]:
     )
 
 
+_LABEL_W = 9          # "tripped", "detail", "means", "check" + padding
+_BODY_W = 68          # wrapped text width; fits an 80-col terminal with indent
+
+
+def _age(then: datetime, now: datetime) -> str:
+    seconds = max(0, int((now - then).total_seconds()))
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 5400:
+        return f"{seconds // 60}m ago"
+    if seconds < 172800:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _field(label: str, text: str, indent: str = "       ") -> None:
+    """One label + wrapped body, the body aligned under itself."""
+    import textwrap
+
+    lines = textwrap.wrap(text, width=_BODY_W) or [""]
+    typer.echo(f"{indent}{label:<{_LABEL_W}}{lines[0]}")
+    for line in lines[1:]:
+        typer.echo(f"{indent}{'':<{_LABEL_W}}{line}")
+
+
 def _echo_latches(latches: list, explain: bool = False) -> None:
-    typer.echo(f"un-acked latches ({len(latches)}):")
+    if not explain:
+        typer.echo(f"un-acked latches ({len(latches)}):")
+        for latch in latches:
+            typer.echo(
+                f"  [{latch.latch_id:>3}] {latch.breaker:<20} {latch.reason.value:<20}"
+                f" {latch.detail}"
+            )
+        return
+
+    now = _now()
+    typer.echo(f"un-acked latches ({len(latches)})")
     for latch in latches:
-        typer.echo(
-            f"  [{latch.latch_id:>3}] {latch.breaker:<20} {latch.reason.value:<20}"
-            f" {latch.detail}"
-        )
-        if not explain:
-            continue
         meaning, guidance = _explain_latch(latch)
-        typer.echo(f"        tripped at: {latch.ts.isoformat()}")
-        typer.echo(f"        what it means: {meaning}")
-        typer.echo(f"        before acking: {guidance}")
+        # Container TZ is the market's, so local time reads as market time.
+        when = latch.ts.astimezone()
         typer.echo("")
+        typer.echo(f"  [{latch.latch_id}] {latch.breaker} · {latch.reason.value}")
+        _field("tripped", f"{when:%Y-%m-%d %H:%M %Z} ({_age(latch.ts, now)})")
+        _field("detail", latch.detail)
+        typer.echo("")
+        _field("means", meaning)
+        typer.echo("")
+        _field("check", guidance)
 
 
 @app.command()
@@ -284,7 +319,9 @@ def latches(
         return
     _echo_latches(unacked, explain=True)
     ids = " ".join(f"--ack {latch.latch_id}" for latch in unacked)
-    typer.echo(f"to resume once you accept all of the above:\n  nwt-risk resume --to ACTIVE {ids}")
+    typer.echo("")
+    typer.echo("once you accept all of the above:")
+    typer.echo(f"  nwt-risk resume --to ACTIVE {ids}")
 
 
 @app.command()
