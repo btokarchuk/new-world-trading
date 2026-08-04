@@ -531,3 +531,43 @@ def test_standing_breach_does_not_re_page_or_re_halt_every_poll(tmp_path):
     # The /fail ping still goes out every poll: healthchecks.io escalation is
     # driven by continued silence, not by how loudly we page.
     assert len([c for c in calls if "/fail" in c[1]]) == 6
+
+
+def test_host_suspend_is_not_treated_as_a_wedged_engine(tmp_path):
+    """Regression (2026-08-04): a laptop sleeping in short bursts made the beat
+    4-11 minutes late against a 180s grace. The watchdog HALTed five times and
+    cost a full trading day. A suspend freezes supervisor and engine together,
+    so if OUR loop lost as much time as the beat is late, that explains it."""
+    risk_db = tmp_path / "data" / "risk.db"
+    write_heartbeat(risk_db, NOW - timedelta(minutes=10))  # 600s late
+    broker = FakeBroker()
+    watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
+
+    # Our own loop last ran 15 minutes ago: the host was asleep, not the engine.
+    watchdog._last_loop_at = NOW - timedelta(minutes=15)
+    watchdog.act(watchdog.check())
+
+    assert broker.cancel_calls == 0, "a suspended host must not trigger a cancel"
+    assert halt_rows(risk_db) == [], "a suspended host must not HALT the engine"
+    warns = [a for a in alerts.alerts() if a["category"] == "watchdog_suspend"]
+    assert len(warns) == 1
+    assert warns[0]["severity"] == "WARN"
+    assert warns[0]["payload"]["watchdog_gap_s"] > 600
+
+
+def test_wedged_engine_still_halts_when_the_watchdog_was_running(tmp_path):
+    """The converse, and the one that matters: if our loop kept its cadence and
+    the engine still missed its promise, that IS a hang. Suspend detection must
+    not become a blanket excuse."""
+    risk_db = tmp_path / "data" / "risk.db"
+    write_heartbeat(risk_db, NOW - timedelta(minutes=10))
+    broker = FakeBroker()
+    watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
+
+    # Our loop ran one interval ago, exactly as scheduled.
+    watchdog._last_loop_at = NOW - timedelta(seconds=watchdog._config.poll_interval_s)
+    watchdog.act(watchdog.check())
+
+    assert broker.cancel_calls == 1
+    assert len(halt_rows(risk_db)) == 1
+    assert [a for a in alerts.alerts() if a["category"] == "watchdog_breach"]

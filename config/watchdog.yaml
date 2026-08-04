@@ -12,7 +12,12 @@
 # Engine beats from inside its decision loop with a promised next_due; the
 # reconcile/poll cadence is 60s. 180s = three missed promises before the
 # watchdog acts, so a single slow API call or GC pause can never halt trading.
-heartbeat_grace_s: 180
+# 180s was tuned for an always-on box. On a laptop that suspends, short host
+# naps pushed beats 4-11 minutes late and cost a trading day (2026-08-04).
+# Co-suspension detection is the real fix; this is belt-and-braces headroom for
+# gaps too short for the watchdog's own loop to notice. Tighten it back toward
+# 180 on the dedicated machine.
+heartbeat_grace_s: 600
 
 # Repeat pages for the SAME standing breach are suppressed this long.
 # Cancels still run every poll; only the paging backs off. 315 identical

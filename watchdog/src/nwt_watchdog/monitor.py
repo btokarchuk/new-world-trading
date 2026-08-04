@@ -31,6 +31,14 @@ from .alerts import WatchdogAlerts
 from .config import WatchdogConfig
 from .invariants import RATE_WINDOW, Breach
 
+
+def _late_seconds(breach: Breach) -> float:
+    """Seconds late, parsed back out of the heartbeat breach's observed field."""
+    try:
+        return float(breach.observed.split("s")[0])
+    except (ValueError, AttributeError, IndexError):
+        return float("inf")  # unparseable => never explainable by a suspend
+
 _ISSUER = "watchdog"
 
 # Duplicated from the engine's supervision schema rather than imported: this
@@ -76,6 +84,9 @@ class Watchdog:
         # whether anyone saw the first alert.
         self._last_page_reason: str | None = None
         self._last_page_at: datetime | None = None
+        # Our own last loop time. If WE also missed our cadence, the whole host
+        # was suspended and the engine's late beat proves nothing.
+        self._last_loop_at: datetime | None = None
         self._page_backoff_s = float(getattr(config, "page_backoff_s", 900))
 
     def read_heartbeat(self) -> dict | None:
@@ -117,6 +128,27 @@ class Watchdog:
         for breach in [b for b in breaches if b.severity == "WARN"]:
             self._alerts.raise_alert("WARN", breach.name, breach.detail, breach.model_dump())
         critical = [b for b in breaches if b.severity == "CRITICAL"]
+
+        # A suspend freezes supervisor and engine alike. If our own loop lost
+        # at least as much time as the engine's beat is late, the lateness is
+        # explained by the gap, not by a hang — WARN and let the engine keep
+        # its positions rather than HALTing a system that never misbehaved.
+        skipped = self._co_suspended(self._now())
+        if skipped > 0:
+            explained = [
+                b for b in critical
+                if b.name == "heartbeat_overdue" and _late_seconds(b) <= skipped
+            ]
+            for breach in explained:
+                self._alerts.raise_alert(
+                    "WARN",
+                    "watchdog_suspend",
+                    f"{breach.detail} — explained by a {skipped:.0f}s gap in the"
+                    " watchdog's own loop (host suspended); not treating it as a hang",
+                    {**breach.model_dump(), "watchdog_gap_s": skipped},
+                )
+            critical = [b for b in critical if b not in explained]
+
         if not critical:
             self._alerts.ping_ok()
             return
@@ -148,6 +180,23 @@ class Watchdog:
                 },
             )
         self._alerts.ping_fail(reason)
+
+    def _co_suspended(self, now: datetime) -> float:
+        """Seconds our own loop skipped, beyond its normal cadence.
+
+        A laptop or VM suspend freezes the supervisor and the engine together,
+        so a late heartbeat after a suspend is not evidence of a wedged engine
+        — it is evidence that time moved while nobody was running. Cancelling
+        and HALTing on that is a false positive, and five of them in one night
+        (2026-08-04) cost a full trading day.
+
+        Measured on the wall clock deliberately: a monotonic clock does not
+        advance across suspend, which is exactly the gap we need to see.
+        """
+        if self._last_loop_at is None:
+            return 0.0
+        gap = (now - self._last_loop_at).total_seconds()
+        return max(0.0, gap - self._config.poll_interval_s)
 
     def _halt_outstanding(self) -> bool:
         """True when a HALT we already issued has not been consumed yet."""
@@ -189,6 +238,8 @@ class Watchdog:
                 self.act(self.check())
             except Exception as exc:
                 self._survive(exc)
+            # Stamped AFTER acting so act() compares against the previous loop.
+            self._last_loop_at = self._now()
             if self._running:
                 self._sleep(self._config.poll_interval_s)
 
