@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class OrderLimits(BaseModel, frozen=True):
@@ -78,6 +78,36 @@ class ReconcileRules(BaseModel, frozen=True):
     crypto_qty_rel_tolerance: Decimal = Decimal("0.000001")
 
 
+class ProtectionRules(BaseModel, frozen=True):
+    """Catastrophe stops (docs/design/protective-stops.md). NOT a trading rule:
+    the distance is chosen to never fire while the system is alive — its only
+    job is bounding loss when the machine is dead with positions open.
+
+    CHANGING distance_pct INVALIDATES the no-op backtest re-run and the entire
+    never-fires-in-sample argument (§6). Re-derive, re-run, re-certify.
+    """
+
+    enabled: bool = True
+    distance_pct: Decimal = Decimal("25")
+    # Two-sided sanity band around the intended distance, measured from the
+    # lot's avg cost: rejects fat-fingered tactical stops (1% away) as hard as
+    # runaway ones (40% away). Design §4 phase 4 point 1.
+    band_min_pct: Decimal = Decimal("20")
+    band_max_pct: Decimal = Decimal("30")
+    # Sleeves whose positions deliberately carry NO stop (owner decision:
+    # control is the benchmark; a stopped benchmark is not a benchmark).
+    exempt_sleeves: tuple[str, ...] = ()
+    # A protective stop FIRING halts the whole system (owner decision §8 row
+    # 5): by construction it is an event outside the entire sample.
+    halt_on_fire: bool = True
+
+    @model_validator(mode="after")
+    def _band_contains_distance(self) -> "ProtectionRules":
+        if not self.band_min_pct <= self.distance_pct <= self.band_max_pct:
+            raise ValueError("protection band must contain distance_pct")
+        return self
+
+
 class RiskConfig(BaseModel, frozen=True):
     equity_reference_usd: Decimal = Decimal("10000")
     order: OrderLimits = OrderLimits()
@@ -89,6 +119,7 @@ class RiskConfig(BaseModel, frozen=True):
     sleeves: dict[str, SleeveBudget] = {}
     breakers: BreakerLimits = BreakerLimits()
     reconcile: ReconcileRules = ReconcileRules()
+    protection: ProtectionRules = ProtectionRules()
 
     config_hash: str = ""
 

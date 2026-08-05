@@ -6,6 +6,7 @@ from enum import StrEnum
 class ReasonCode(StrEnum):
     # state / session
     STATE_NOT_ACTIVE = "STATE_NOT_ACTIVE"
+    STOP_FIRED = "STOP_FIRED"  # a catastrophe stop executed: outside-sample event
     SESSION_CLOSED = "SESSION_CLOSED"
     ENTRY_CUTOFF = "ENTRY_CUTOFF"
     CRYPTO_WINDOW = "CRYPTO_WINDOW"

@@ -14,12 +14,20 @@ class TradingState(StrEnum):
     REDUCING = "REDUCING"  # only reduce-only/protective intents may flow
     HALTED = "HALTED"      # nothing flows except cancels; kill/flatten always work
 
-    def allows(self, *, reduces_position: bool) -> bool:
+    def allows(self, *, reduces_position: bool, is_protective: bool = False) -> bool:
+        """HALTED blocks all flow EXCEPT arming a protective stop.
+
+        Owner decision (protective-stops design §8 row 4): HALTED means "stop
+        deciding", and it is precisely when positions are most likely to be
+        sitting naked (the watchdog's cancel_all just killed their stops).
+        Arming protection is not a trading decision — it never opens exposure,
+        never widens, and reduces only. Cancelling or widening stays blocked.
+        """
         if self is TradingState.ACTIVE:
             return True
         if self is TradingState.REDUCING:
-            return reduces_position
-        return False
+            return reduces_position or is_protective
+        return is_protective
 
 
 #: Ordering for "toward safety" checks: transitions may only increase this rank

@@ -48,6 +48,7 @@ class OrderIntent(BaseModel, frozen=True):
     created_at: datetime
     reduces_position: bool = False        # lets governor pass exits in REDUCING
     is_protective: bool = False           # stop/exit orders; relaxed throttling
+    stop_price: Decimal | None = None     # protective intents only: resting stop trigger
     provenance: Provenance = "classical"
 
     @model_validator(mode="after")
@@ -58,12 +59,29 @@ class OrderIntent(BaseModel, frozen=True):
             raise ValueError("qty must be positive")
         if self.notional is not None and self.notional <= 0:
             raise ValueError("notional must be positive")
+        # Protective intents are the narrow exception to "every equity order is
+        # a limit": they carry stop_price INSTEAD of limit_price, and the shape
+        # is locked down hard because this is the seam everything else trusts.
+        if self.is_protective:
+            if self.side is not Side.SELL:
+                raise ValueError("protective intents must be SELL (long-only book)")
+            if not self.reduces_position:
+                raise ValueError("protective intents must reduce position")
+            if self.stop_price is None or self.stop_price <= 0:
+                raise ValueError("protective intents require a positive stop_price")
+            if self.limit_price is not None:
+                raise ValueError(
+                    "protective intents are plain stops: stop_price only, no limit"
+                    " (a stop-limit that gaps through its limit is not protection)"
+                )
+        elif self.stop_price is not None:
+            raise ValueError("stop_price is reserved for protective intents")
         if self.asset_class in (AssetClass.EQUITY, AssetClass.ETF):
             if self.qty is None:
                 raise ValueError("equity/ETF intents must be whole-share qty, not notional")
             if self.qty != self.qty.to_integral_value():
                 raise ValueError("equity/ETF qty must be whole shares")
-            if self.limit_price is None:
+            if self.limit_price is None and not self.is_protective:
                 raise ValueError("equity/ETF intents require a limit price (no market orders)")
         return self
 
@@ -84,6 +102,11 @@ class ApprovedOrder(BaseModel, frozen=True):
             if self.approved_notional is None or self.approved_notional > self.intent.notional:
                 raise ValueError("governor may clamp down, never up (notional)")
         return self
+
+    # Never-widen-stop is structural, not a validator: ApprovedOrder carries NO
+    # approved_stop_price field, so approval is pass/fail on the frozen
+    # intent's own stop_price and nothing downstream can move a stop at all.
+    # If an approved_stop_price is ever added, add the validator with it.
 
 
 class PositionView(BaseModel, frozen=True):
@@ -107,6 +130,8 @@ class OrderRef(BaseModel, frozen=True):
     qty: Decimal | None = None
     notional: Decimal | None = None
     limit_price: Decimal | None = None
+    stop_price: Decimal | None = None
+    is_protective: bool = False           # resting stops are not working entries
     submitted_at: datetime
 
 

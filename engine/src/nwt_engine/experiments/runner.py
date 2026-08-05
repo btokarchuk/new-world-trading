@@ -16,7 +16,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
-from nwt_contracts import PortfolioView, RiskContext, TradingState
+from nwt_contracts import PortfolioView, RiskContext, Side, TradingState
 
 from nwt_engine.broker import SimBroker
 from nwt_engine.core import BarEvent, EventQueue, ScheduleEvent, SimClock
@@ -167,6 +167,7 @@ class BacktestRunner:
                     cycle += 1
                     broker.expire_day_orders()
                     self._mark_and_reconcile(event.ts, ledgers, broker, marks, db, journal)
+                    self._arm_protection(event.ts, ledgers, broker, universe, order_alloc, journal)
                     self._decide(
                         event.ts,
                         cycle,
@@ -287,6 +288,53 @@ class BacktestRunner:
             else:
                 remaining.append(action)
         pending_ca[bar.symbol] = remaining
+
+    def _arm_protection(self, ts, ledgers, broker, universe, order_alloc, journal) -> None:
+        """Same reconciler the paper cycle runs (shared core): desired minus
+        resting, cancel drift, arm gaps. No exit interlock here — SimBroker
+        has no held-for-orders model, so a strategy sell cannot be rejected by
+        a resting stop; the interlock is a live-broker concern only."""
+        if self.config.protection is None:
+            return
+        from nwt_engine.execution.protection import (
+            compute_desired_stops,
+            diff_protection,
+            is_protective_coid,
+        )
+
+        desired = compute_desired_stops(
+            ledgers,
+            universe,
+            distance_pct=self.config.protection.distance_pct,
+            exempt_sleeves=tuple(self.config.protection.exempt_sleeves),
+        )
+        resting = {
+            o.client_order_id
+            for o in broker.get_open_orders()
+            if is_protective_coid(o.client_order_id)
+        }
+        arms, cancels = diff_protection(desired, resting)
+        for coid in cancels:
+            broker.cancel(coid)
+            journal(ts, "protective_cancel", {"coid": coid})
+        for stop in arms:
+            ticket = OrderTicket(
+                client_order_id=stop.client_order_id,
+                symbol=stop.symbol,
+                side=Side.SELL,
+                qty=stop.qty,
+                order_type="stop",
+                stop_price=stop.stop_price,
+                tif="gtc",
+            )
+            order_alloc[stop.client_order_id] = stop.sleeve_id
+            broker.submit(ticket)
+            journal(
+                ts,
+                "protective_arm",
+                {"coid": stop.client_order_id, "symbol": stop.symbol,
+                 "qty": str(stop.qty), "stop": str(stop.stop_price)},
+            )
 
     def _apply_fill(self, fill: Fill, order_alloc, ledgers, db, journal) -> None:
         target = order_alloc.get(fill.client_order_id)
@@ -473,7 +521,7 @@ class BacktestRunner:
                 qty=qty,
                 notional=notional,
                 limit_price=limit_price,
-                tif="day",
+                tif=self.config.universe.get(symbol).tif,
             )
             order_alloc[coid] = sleeve_or_plan
             ack = broker.submit(ticket)

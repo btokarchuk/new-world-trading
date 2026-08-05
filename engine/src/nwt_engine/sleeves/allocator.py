@@ -105,6 +105,15 @@ def _split_prorata(
 
 
 def build_net_plans(approved: list[ApprovedOrder]) -> list[NetPlan]:
+    # Protective stops are EXCLUDED from netting, asserted rather than
+    # encoded: a netted stop has no owning sleeve, and allocate_fill would
+    # mis-attribute the exit — LedgerInvariantError territory. The paper cycle
+    # filters them out before calling; this guard makes the contract loud.
+    protective = [a for a in approved if a.intent.is_protective]
+    if protective:
+        raise ValueError(
+            f"protective intents must never be netted: {[a.intent.intent_id for a in protective]}"
+        )
     by_symbol: dict[str, list[ApprovedOrder]] = {}
     for order in approved:
         if order.intent.qty is None:

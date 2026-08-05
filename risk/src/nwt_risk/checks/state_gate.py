@@ -17,7 +17,10 @@ class StateGateCheck:
         self, intent: OrderIntent, ctx: GovernorContext, cfg: RiskConfig
     ) -> CheckResult:
         state = ctx.base.trading_state
-        if not state.allows(reduces_position=intent.reduces_position):
+        if not state.allows(
+            reduces_position=intent.reduces_position,
+            is_protective=intent.is_protective,
+        ):
             return reject(
                 self.name,
                 ReasonCode.STATE_NOT_ACTIVE,

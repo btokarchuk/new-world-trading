@@ -16,18 +16,24 @@ class StalenessCheck:
     def evaluate(
         self, intent: OrderIntent, ctx: GovernorContext, cfg: RiskConfig
     ) -> CheckResult:
-        quote = ctx.quotes.get(intent.symbol)
-        if quote is None:
-            return reject(
-                self.name, ReasonCode.STALE_QUOTE, f"no quote for {intent.symbol}"
-            )
-        age = (ctx.now - quote.ts).total_seconds()
-        if age > cfg.staleness.max_quote_age_s:
-            return reject(
-                self.name,
-                ReasonCode.STALE_QUOTE,
-                f"quote age {age:.1f}s > {cfg.staleness.max_quote_age_s}s",
-            )
+        # Protective arms price off the LEDGER, not the market: they need no
+        # fresh quote (and must be armable at 16:05 when quotes are stale).
+        # Reconcile-age and clock-skew still apply below — those bear on
+        # whether the ledger itself is trustworthy, which a protective order
+        # depends on MORE than a normal one, not less.
+        if not intent.is_protective:
+            quote = ctx.quotes.get(intent.symbol)
+            if quote is None:
+                return reject(
+                    self.name, ReasonCode.STALE_QUOTE, f"no quote for {intent.symbol}"
+                )
+            age = (ctx.now - quote.ts).total_seconds()
+            if age > cfg.staleness.max_quote_age_s:
+                return reject(
+                    self.name,
+                    ReasonCode.STALE_QUOTE,
+                    f"quote age {age:.1f}s > {cfg.staleness.max_quote_age_s}s",
+                )
         reconcile_age = ctx.base.last_reconcile_age_s
         if reconcile_age is None or reconcile_age > cfg.staleness.max_reconcile_age_s:
             return reject(

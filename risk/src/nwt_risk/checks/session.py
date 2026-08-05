@@ -32,6 +32,13 @@ class SessionCheck:
         return self._crypto(intent, cfg, local)
 
     def _equity(self, intent, ctx, cfg, local) -> CheckResult:
+        # Protective SELL stops arm at any hour: the 16:05 EOD poll must be
+        # able to protect a late fill rather than leave it naked overnight,
+        # and a GTC stop is not an execution now — it is a resting instruction
+        # the exchange holds. Scoped hard to the contract-validated protective
+        # shape (SELL + reduces + stop, enforced at construction).
+        if intent.is_protective:
+            return allow(self.name)
         xnys: SessionInfo | None = next(
             (s for s in ctx.base.sessions if s.calendar == "XNYS"), None
         )

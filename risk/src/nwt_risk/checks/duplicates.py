@@ -24,6 +24,13 @@ class DuplicateCheck:
                 intent.sleeve_id,
             ):
                 continue
+            # A protective re-arm inside the window is the reconciler doing
+            # its job after a cancel (kill, expiry, exit interlock) — the
+            # repeat IS the feature. Only skip echoes of other PROTECTIVE
+            # orders: a protective sell after a strategy sell is still two
+            # different instructions and stays gated.
+            if intent.is_protective and ro.is_protective:
+                continue
             age = (ctx.now - ro.ts).total_seconds()
             if age < window:
                 return reject(

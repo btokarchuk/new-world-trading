@@ -72,7 +72,10 @@ class RiskGovernor:
             results = [check.evaluate(intent, ctx, self._cfg) for check in self._checks]
 
             # Structural state gate — belt and suspenders over the state check.
-            if not state.allows(reduces_position=intent.reduces_position):
+            if not state.allows(
+                reduces_position=intent.reduces_position,
+                is_protective=intent.is_protective,
+            ):
                 results.append(
                     CheckResult(
                         check="structural_state_gate",

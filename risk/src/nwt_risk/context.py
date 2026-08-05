@@ -33,6 +33,7 @@ class RecentOrder(BaseModel, frozen=True):
     side: Side
     sleeve_id: str
     is_entry: bool
+    is_protective: bool = False  # re-arms must not trip the duplicate window
 
 
 class SymbolCooldown(BaseModel, frozen=True):

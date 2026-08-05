@@ -281,6 +281,26 @@ class AlpacaHttpBroker(Broker):
 
     @staticmethod
     def _order_body(ticket: OrderTicket) -> dict[str, str]:
+        if ticket.order_type == "stop":
+            # Guard, not just a mapping: Alpaca crypto supports no stop type
+            # worth trusting (P0.6c unverified; design §7 keeps crypto stops
+            # OFF), so a crypto stop ticket is a bug upstream, not a request.
+            if "/" in ticket.symbol:
+                raise BrokerError(
+                    f"crypto stop rejected ({ticket.symbol}): Alpaca has no"
+                    " trustworthy stop type for crypto; design keeps crypto"
+                    " stops off (docs/design/protective-stops.md §7)"
+                )
+            body = {
+                "symbol": ticket.symbol,
+                "side": ticket.side.value,
+                "type": "stop",
+                "stop_price": str(ticket.stop_price),
+                "time_in_force": ticket.tif,
+                "client_order_id": ticket.client_order_id,
+                "qty": str(ticket.qty),
+            }
+            return body
         body = {
             "symbol": ticket.symbol,  # orders API accepts the slashed crypto form as-is
             "side": ticket.side.value,

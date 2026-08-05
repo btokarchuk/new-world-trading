@@ -30,6 +30,12 @@ from ..base import AccountState, Broker, BrokerPosition, OrderAck, OrderStatus
 from .costs import CostModel
 
 
+# Stop fills carry an extra haircut beyond normal slippage: stops fire on the
+# worst days in the tape, and a daily bar cannot see how far through the level
+# the first print really was. 100 bps is deliberately pessimistic (design §5).
+_STOP_CATASTROPHE_SLIP = Decimal("0.01")
+
+
 class _OpenOrder:
     __slots__ = ("ticket", "state", "accepted_ts")
 
@@ -136,8 +142,16 @@ class SimBroker(Broker):
         then attempt fills for resting orders at this bar's open."""
         self._apply_corporate_actions(bar)
         self._last_close[bar.symbol] = bar.close
-        for coid in list(self._open):
-            order = self._open[coid]
+        # Intrabar ordering is a MODELING CHOICE, not data: OHLC cannot say
+        # whether a stop or a limit was touched first. Stops resolve first —
+        # conservative, and documented as such (design §5 point 6).
+        ordered = sorted(
+            self._open.items(),
+            key=lambda kv: 0 if kv[1].ticket.order_type == "stop" else 1,
+        )
+        for coid, order in ordered:
+            if coid not in self._open:
+                continue  # consumed earlier in this pass
             if order.ticket.symbol != bar.symbol:
                 continue
             if order.accepted_ts > bar.ts_open:
@@ -173,6 +187,8 @@ class SimBroker(Broker):
 
     def _try_fill(self, ticket: OrderTicket, bar: Bar) -> Fill | None:
         inst = self._instrument(ticket.symbol)
+        if ticket.order_type == "stop":
+            return self._try_fill_stop(ticket, bar, inst)
         if ticket.notional is not None:
             # Notional market flow (crypto/DI): fill at open with slippage.
             price = self._costs.slip_price(inst.asset_class, ticket.side, bar.open)
@@ -210,6 +226,39 @@ class SimBroker(Broker):
             ts=bar.ts_open,
             fees=fees,
             source="sim",
+        )
+
+    def _try_fill_stop(self, ticket: OrderTicket, bar: Bar, inst: Instrument) -> Fill | None:
+        """Protective sell stop: SEPARATE geometry from limits, deliberately
+        pessimistic (design §5).
+
+        Trigger: bar.low <= stop (the level was touched). Fill price:
+        min(bar.open, stop) — a gap-down opens THROUGH the stop and fills near
+        the open, materially worse than the stop — then a catastrophe-slippage
+        haircut on top, because stops fire on crash days and crash days have
+        the worst intrabar ranges in the tape. Daily bars cannot see the true
+        fill; the honest model is a floor on the damage, not an estimate.
+        The parity claim in broker/base.py explicitly excludes stop fills.
+        """
+        assert ticket.qty is not None and ticket.stop_price is not None
+        if ticket.side is not Side.SELL:
+            return None  # long-only book arms sell stops only
+        if bar.low > ticket.stop_price:
+            return None
+        price = min(bar.open, ticket.stop_price)
+        price = price * (1 - _STOP_CATASTROPHE_SLIP)
+        fees = self._costs.fees(inst.asset_class, ticket.qty, price)
+        return Fill(
+            fill_id=f"simfill-{next(self._fill_seq)}",
+            client_order_id=ticket.client_order_id,
+            symbol=ticket.symbol,
+            side=Side.SELL,
+            qty=ticket.qty,
+            price=price.quantize(Decimal("0.0001")),
+            ts=bar.ts_open,
+            fees=fees,
+            source="sim",
+            protective=True,
         )
 
     def _apply_fill(self, fill: Fill) -> None:

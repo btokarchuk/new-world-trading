@@ -41,6 +41,15 @@ class SleeveConfig(BaseModel):
     params: dict = {}
 
 
+class ProtectionConfig(BaseModel):
+    """Catastrophe stops in backtest — mirrors risk.yaml's protection block so
+    the identity re-run (design §6) exercises the same policy the paper cycle
+    arms. None/absent = no stops, byte-identical to pre-stop backtests."""
+
+    distance_pct: Decimal
+    exempt_sleeves: list[str] = []
+
+
 class ExperimentConfig(BaseModel):
     id: str
     mode: Literal["backtest", "paper", "live"] = "backtest"
@@ -50,6 +59,7 @@ class ExperimentConfig(BaseModel):
     sleeves: list[SleeveConfig]
     #: sleeve every other sleeve is benchmarked against (alpha/beta/IR metrics)
     control_sleeve: str | None = None
+    protection: ProtectionConfig | None = None
     results_db: Path = Path("data/results.db")
 
     @property

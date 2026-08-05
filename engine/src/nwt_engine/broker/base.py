@@ -37,6 +37,13 @@ class Broker(ABC):
     """The parity boundary: SimBroker, AlpacaBroker(paper), AlpacaBroker(live).
 
     Strategy, sleeve, and risk code must behave identically against all three.
+
+    EXPLICIT EXCEPTION — stop fills (design §5): SimBroker's stop model is a
+    deliberately pessimistic floor, not a parity claim. A daily bar cannot see
+    where inside a crash day the first print through the level was; real stop
+    fills in a gap can be materially worse than min(open, stop) and are
+    modeled with an extra catastrophe haircut. Every other order type keeps
+    the full parity contract.
     """
 
     @abstractmethod

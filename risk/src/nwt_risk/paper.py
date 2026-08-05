@@ -25,6 +25,7 @@ from typing import Callable
 from pydantic import BaseModel
 
 from nwt_contracts import (
+    OrderIntent,
     OrderRef,
     PortfolioView,
     RiskContext,
@@ -44,8 +45,15 @@ from .config import RiskConfig
 from .context import GovernorContext, QuoteView, RecentOrder
 from .governor import RiskGovernor
 from .reasons import ReasonCode
+from .protect import plan_protection
 from .reconcile import ExpectedState, ReconcileEngine
 from .state import TradingStateMachine
+
+# Exit interlock: how long to wait for a protective cancel to confirm before
+# deferring the exit to the next cycle. Bounded — never sell into an
+# unconfirmed cancel, and never stall the whole cycle for more than ~5s.
+_CANCEL_CONFIRM_ATTEMPTS = 5
+_CANCEL_CONFIRM_WAIT_S = 1.0
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ledger_entries (
@@ -65,7 +73,10 @@ CREATE TABLE IF NOT EXISTS paper_orders (
     limit_price TEXT,
     submitted_ts TEXT NOT NULL,
     state TEXT NOT NULL,
-    is_entry INTEGER NOT NULL DEFAULT 1
+    is_entry INTEGER NOT NULL DEFAULT 1,
+    is_protective INTEGER NOT NULL DEFAULT 0,
+    stop_price TEXT,
+    protects_sleeve TEXT
 );
 CREATE TABLE IF NOT EXISTS fills_seen (
     fill_id TEXT PRIMARY KEY,
@@ -132,6 +143,16 @@ class PaperStore:
         self.conn = sqlite3.connect(path)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(_SCHEMA)
+        # Live dbs predate the protective columns; ALTER is idempotent-by-try.
+        for ddl in (
+            "ALTER TABLE paper_orders ADD COLUMN is_protective INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE paper_orders ADD COLUMN stop_price TEXT",
+            "ALTER TABLE paper_orders ADD COLUMN protects_sleeve TEXT",
+        ):
+            try:
+                self.conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def audit(self, now: datetime, kind: str, payload: dict) -> None:
         self.conn.execute(
@@ -163,7 +184,8 @@ class PaperStore:
     def open_order_rows(self) -> list[dict]:
         rows = self.conn.execute(
             "SELECT client_order_id, sleeve_or_net, net_plan_json, symbol, side, qty,"
-            " notional, limit_price, submitted_ts FROM paper_orders WHERE state='open'"
+            " notional, limit_price, submitted_ts, is_protective, stop_price"
+            " FROM paper_orders WHERE state='open'"
         ).fetchall()
         keys = [
             "client_order_id",
@@ -175,13 +197,15 @@ class PaperStore:
             "notional",
             "limit_price",
             "submitted_ts",
+            "is_protective",
+            "stop_price",
         ]
         return [dict(zip(keys, row, strict=True)) for row in rows]
 
     def recent_orders(self, since: datetime) -> list[RecentOrder]:
         rows = self.conn.execute(
-            "SELECT submitted_ts, symbol, side, sleeve_or_net, is_entry FROM paper_orders"
-            " WHERE submitted_ts >= ?",
+            "SELECT submitted_ts, symbol, side, sleeve_or_net, is_entry, is_protective"
+            " FROM paper_orders WHERE submitted_ts >= ?",
             (since.isoformat(),),
         ).fetchall()
         return [
@@ -191,8 +215,9 @@ class PaperStore:
                 side=Side(side),
                 sleeve_id=sleeve,
                 is_entry=bool(is_entry),
+                is_protective=bool(is_protective),
             )
-            for ts, symbol, side, sleeve, is_entry in rows
+            for ts, symbol, side, sleeve, is_entry, is_protective in rows
         ]
 
     def record_order(
@@ -207,13 +232,17 @@ class PaperStore:
         limit_price: Decimal | None,
         now: datetime,
         is_entry: bool,
+        *,
+        is_protective: bool = False,
+        stop_price: Decimal | None = None,
     ) -> None:
         self.conn.execute(
             # Explicit columns: a bare VALUES list silently corrupts the row
             # the day the schema gains a column (protective stops will add three).
             "INSERT OR REPLACE INTO paper_orders (client_order_id, sleeve_or_net,"
             " net_plan_json, symbol, side, qty, notional, limit_price,"
-            " submitted_ts, state, is_entry) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " submitted_ts, state, is_entry, is_protective, stop_price,"
+            " protects_sleeve) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 coid,
                 sleeve_or_net,
@@ -226,6 +255,9 @@ class PaperStore:
                 now.isoformat(),
                 "open",
                 1 if is_entry else 0,
+                1 if is_protective else 0,
+                str(stop_price) if stop_price is not None else None,
+                sleeve_or_net if is_protective else None,
             ),
         )
         self.conn.commit()
@@ -286,7 +318,11 @@ class PaperCycle:
         quotes_loader: Callable[[], dict],     # symbol -> QuoteView kwargs dict
         now_fn: Callable[[], datetime] = lambda: datetime.now(UTC),
         unallocated_buffer: Decimal = Decimal("0"),
+        sleep_fn: Callable[[float], None] | None = None,
     ) -> None:
+        import time as _time
+
+        self.sleep_fn = sleep_fn or _time.sleep
         self.unallocated_buffer = unallocated_buffer
         self.broker = broker
         self.universe = universe
@@ -349,6 +385,28 @@ class PaperCycle:
                     now, "external_fill", {"fill_id": fill.fill_id, "coid": fill.client_order_id}
                 )
                 continue
+            stop_fired = bool(row["is_protective"])
+            if stop_fired:
+                # A catastrophe stop EXECUTED: by construction an event outside
+                # the entire sample (owner decision §8 row 5). Bound the blast:
+                # 24h cooldown via stop_out above, and HALT the whole system —
+                # whatever the market is doing, it is not what the strategies
+                # were validated on. Trip BEFORE applying the fill so a crash
+                # mid-poll leaves us halted, not un-halted with a stop fill.
+                self.store.audit(
+                    now,
+                    "stop_fired",
+                    {"coid": fill.client_order_id, "symbol": fill.symbol,
+                     "price": str(fill.price), "qty": str(fill.qty)},
+                )
+                if self.cfg.protection.halt_on_fire:
+                    self.state.trip(
+                        "protection",
+                        TradingState.HALTED,
+                        ReasonCode.STOP_FIRED,
+                        f"catastrophe stop filled: {fill.symbol} {fill.qty} @"
+                        f" {fill.price} ({fill.client_order_id})"[:200],
+                    )
             if row["net_plan_json"]:
                 plan = NetPlan.model_validate_json(row["net_plan_json"])
                 portions = [
@@ -385,7 +443,7 @@ class PaperCycle:
                             payload={
                                 "symbol": fill.symbol,
                                 "pnl": str(pnl),
-                                "stop_out": False,
+                                "stop_out": stop_fired,
                             },
                         )
                     )
@@ -547,6 +605,8 @@ class PaperCycle:
                     qty=Decimal(row["qty"]) if row["qty"] else None,
                     notional=Decimal(row["notional"]) if row["notional"] else None,
                     limit_price=Decimal(row["limit_price"]) if row["limit_price"] else None,
+                    stop_price=Decimal(row["stop_price"]) if row["stop_price"] else None,
+                    is_protective=bool(row["is_protective"]),
                     submitted_at=datetime.fromisoformat(row["submitted_ts"]),
                 )
             )
@@ -574,7 +634,52 @@ class PaperCycle:
             clock_skew_s=self._clock_skew(now),
         )
 
-        outcome = self.governor.review(intents, gov_ctx)
+        # Protective coverage: desired-vs-resting diff (risk/protect.py). The
+        # reconciler is declarative — it never asks WHY coverage is missing
+        # (watchdog cancel, kill, 90-day expiry, crash, pre-feature position),
+        # it just re-arms the difference every cycle. Its intents run through
+        # the same governor as everything else; HALTED admits arm-only.
+        protection_plan = plan_protection(ledgers, open_refs, self.universe, self.cfg)
+        halted = self.state.state() is TradingState.HALTED
+        protective_intents = []
+        for stop in protection_plan.arms:
+            protective_intents.append(
+                OrderIntent(
+                    intent_id=stop.client_order_id,
+                    sleeve_id=stop.sleeve_id,
+                    strategy="protection",
+                    symbol=stop.symbol,
+                    asset_class=self.universe.get(stop.symbol).asset_class,
+                    side=Side.SELL,
+                    qty=stop.qty,
+                    stop_price=stop.stop_price,
+                    as_of=now,
+                    created_at=now,
+                    reduces_position=True,
+                    is_protective=True,
+                    provenance="control",
+                )
+            )
+        # Cancels re-price drifted stops (lot changed). In HALTED: arm-only —
+        # never cancel (owner decision §8 row 4). To avoid double-covering a
+        # symbol whose stale stop we may not cancel, defer its re-arm too.
+        if halted:
+            frozen = {
+                (ref.symbol) for ref in open_refs if ref.is_protective
+            }
+            protective_intents = [
+                i for i in protective_intents if i.symbol not in frozen
+            ]
+        else:
+            for coid in protection_plan.cancels:
+                try:
+                    self.broker.cancel(coid)
+                    self.store.mark_order(coid, "cancelled")
+                    self.store.audit(now, "protective_cancel", {"coid": coid})
+                except Exception as exc:
+                    notes.append(f"protective cancel failed for {coid}: {exc}")
+
+        outcome = self.governor.review(intents + protective_intents, gov_ctx)
         for verdict in outcome.verdicts:
             self.store.audit(now, "verdict", verdict.model_dump(mode="json"))
         rejected: dict[str, int] = {}
@@ -586,6 +691,27 @@ class PaperCycle:
         submitted = 0
         crosses = 0
         approved_list = list(outcome.approved)
+
+        # Protective stops — direct, NEVER netted: a netted stop has no owning
+        # sleeve and allocate_fill would mis-attribute the exit.
+        protective_approvals = [a for a in approved_list if a.intent.is_protective]
+        approved_list = [a for a in approved_list if not a.intent.is_protective]
+        for approval in protective_approvals:
+            intent = approval.intent
+            submitted += self._submit(
+                intent.intent_id,  # the deterministic prot- coid
+                intent.sleeve_id,
+                None,
+                intent.symbol,
+                Side.SELL,
+                approval.approved_qty,
+                None,
+                None,
+                False,
+                now,
+                stop_price=intent.stop_price,
+                is_protective=True,
+            )
 
         # Notional (crypto) flow — per sleeve, unnetted.
         for approval in approved_list:
@@ -699,21 +825,55 @@ class PaperCycle:
         limit_price: Decimal | None,
         is_entry: bool,
         now: datetime,
+        *,
+        stop_price: Decimal | None = None,
+        is_protective: bool = False,
     ) -> int:
-        ticket = OrderTicket(
-            client_order_id=coid,
-            symbol=symbol,
-            side=side,
-            qty=qty,
-            notional=notional,
-            limit_price=limit_price,
-            # Per-instrument: `day` for equities (nothing survives the close,
-            # which bounds the unattended surface), `gtc` for crypto — Alpaca
-            # rejects `day` on a 24/7 market that never has a close to expire at.
-            tif=self.universe.get(symbol).tif,
-        )
+        # EXIT INTERLOCK (design §4 phase 5): a resting sell stop holds the
+        # shares, so a strategy SELL on the same symbol would be rejected for
+        # insufficient qty — five of those in ten minutes trips the rejection
+        # breaker and HALTs on a normal rebalance. Cancel the resting stops,
+        # CONFIRM the cancel terminal, then submit. On no confirmation: skip
+        # this exit this cycle and audit — never sell into an unconfirmed
+        # cancel. The seconds-long unprotected gap is audited; the next
+        # cycle's reconciler re-arms whatever remains.
+        if side is Side.SELL and not is_protective:
+            if not self._clear_protective_stops(symbol, now):
+                self.store.audit(
+                    now,
+                    "exit_deferred",
+                    {"coid": coid, "symbol": symbol,
+                     "reason": "protective cancel unconfirmed"},
+                )
+                return 0
+        if is_protective:
+            ticket = OrderTicket(
+                client_order_id=coid,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                order_type="stop",
+                stop_price=stop_price,
+                # Protection that expires at the close is not protection
+                # (GTC-survives-close proven in paper, P0.6a, 2026-08-05).
+                tif="gtc",
+            )
+        else:
+            ticket = OrderTicket(
+                client_order_id=coid,
+                symbol=symbol,
+                side=side,
+                qty=qty,
+                notional=notional,
+                limit_price=limit_price,
+                # Per-instrument: `day` for equities (nothing survives the close,
+                # which bounds the unattended surface), `gtc` for crypto — Alpaca
+                # rejects `day` on a 24/7 market that never has a close to expire at.
+                tif=self.universe.get(symbol).tif,
+            )
         self.store.record_order(
-            coid, sleeve_or_net, plan, symbol, side, qty, notional, limit_price, now, is_entry
+            coid, sleeve_or_net, plan, symbol, side, qty, notional, limit_price, now,
+            is_entry, is_protective=is_protective, stop_price=stop_price,
         )
         ack = self.broker.submit(ticket)
         self.store.audit(
@@ -726,6 +886,46 @@ class PaperCycle:
             self.breakers.observe(BreakerEvent(kind="rejection", ts=now, payload={}))
             return 0
         return 1
+
+    def _clear_protective_stops(self, symbol: str, now: datetime) -> bool:
+        """Cancel every resting protective stop on `symbol`; True when clear.
+
+        Over-cancels on purpose (all sleeves' stops on the symbol, not just the
+        seller's): an under-cancel rejects the exit and feeds the rejection
+        breaker, while an over-cancel is healed by the next cycle's re-arm and
+        the gap is audited. Confirmation is a bounded poll of open orders —
+        never submit a sell against an unconfirmed cancel.
+        """
+        from .protect import is_protective_coid
+
+        resting = [
+            row["client_order_id"]
+            for row in self.store.open_order_rows()
+            if row["symbol"] == symbol and row["is_protective"]
+            and is_protective_coid(row["client_order_id"])
+        ]
+        if not resting:
+            return True
+        for coid in resting:
+            try:
+                self.broker.cancel(coid)
+            except Exception as exc:
+                self.store.audit(
+                    now, "protective_cancel_error", {"coid": coid, "error": str(exc)}
+                )
+                return False
+        for _ in range(_CANCEL_CONFIRM_ATTEMPTS):
+            open_now = {o.client_order_id for o in self.broker.get_open_orders()}
+            still = [c for c in resting if c in open_now]
+            if not still:
+                for coid in resting:
+                    self.store.mark_order(coid, "cancelled")
+                    self.store.audit(
+                        now, "protective_cancel", {"coid": coid, "for_exit_on": symbol}
+                    )
+                return True
+            self.sleep_fn(_CANCEL_CONFIRM_WAIT_S)
+        return False
 
     def _adv(self, bars_by_symbol: dict) -> dict[str, Decimal]:
         adv: dict[str, Decimal] = {}

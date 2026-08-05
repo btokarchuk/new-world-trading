@@ -22,6 +22,13 @@ class OrderSizeCheck:
     def evaluate(
         self, intent: OrderIntent, ctx: GovernorContext, cfg: RiskConfig
     ) -> CheckResult:
+        # Protective stops are exempt from sizing entirely: a stop covering
+        # less than the full lot is not protection, and a $20 residual must
+        # still be stoppable. Notional caps exist to bound what an order can
+        # BUY; a resting catastrophe SELL bounds loss instead. Price sanity is
+        # the collar's protective band, not a size question.
+        if intent.is_protective:
+            return allow(self.name)
         equity_like = intent.asset_class in (AssetClass.EQUITY, AssetClass.ETF)
         if equity_like and intent.limit_price is None:
             # Belt over the contracts validator: unrepresentable there, blocked here too.

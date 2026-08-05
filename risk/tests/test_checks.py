@@ -93,6 +93,17 @@ def make_intent(**overrides) -> OrderIntent:
         created_at=NOW,
     )
     base.update(overrides)
+    # The contract now locks the protective shape hard (SELL + reduces +
+    # stop_price, no limit); fixtures asking for a protective intent get a
+    # valid one unless they explicitly override those fields to test the seam.
+    if base.get("is_protective"):
+        base.setdefault("side", Side.SELL)
+        base["side"] = Side.SELL if base["side"] is Side.BUY else base["side"]
+        base.setdefault("stop_price", D("75"))
+        base["reduces_position"] = True
+        if base.get("stop_price") is None:
+            base["stop_price"] = D("75")
+        base["limit_price"] = None
     return OrderIntent(**base)
 
 
