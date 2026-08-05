@@ -237,3 +237,35 @@ Four caveats that make it non-optional:
 11. **`is_protective` has never executed in production.** The three existing relaxations in `rate_limit.py`, `session.py`, and `long_only.py` are real code with real tests that have never fired against a live broker. Phase 3 turns them all on at once.
 12. **The cost of the machinery is asserted, not measured.** Cancel-before-exit latency on every strategy exit, re-arm orders against `rate.global_per_day: 40`, and the unprotected window between cancel-confirmed and exit-filled. All small on paper; none measured.
 13. **A stop firing into a crash with no operator present may be worse than holding**, for `trend_etf` specifically. That is the premium we are paying and it is not zero. It is defensible only while the distance stays wide enough that it never fires — which is an argument that dissolves the moment anyone tightens it.
+
+---
+
+## ADDENDUM 2026-08-05 — policy reversed for index sleeves (owner decision)
+
+Brent challenged the premise the same day the machinery landed, and the
+challenge won. His chain: (1) index ETFs are self-healing and cannot die —
+they already own the protection a stop offers, so "weather it" is always
+available to an unleveraged cash account; (2) deliberate divestment should
+happen EARLY on a monitored signal (which is the trend sleeve's exit rule,
+firing near −10%), never at a −25% depth trigger; (3) selling into a crash to
+"recoup" is the exact behavioral error this platform exists to remove — and
+the identity re-run had just priced it: the COVID QQQ stop fired 19 cents off
+the bottom and cost −1.45% CAGR for the decade.
+
+The original §3 policy table is superseded: **index-ETF sleeves carry no
+stops** (exempted in config/risk.yaml). The §2 "what the stop is FOR" analysis
+survives unchanged where its premises hold: **stops remain mandatory for any
+sleeve holding single names or anything that can genuinely go to zero** —
+new sleeves are protected by default unless explicitly exempted. The
+machinery, the reconciler, the governor exemptions, the SimBroker model, and
+the exp_0004 identity harness all remain — built, tested, and waiting for the
+first sleeve whose instruments can actually die (llm_analyst). The watchdog
+coverage check is disabled until then and must be re-enabled with that sleeve.
+
+The stop doctrine we originally imported comes from leveraged, single-name,
+and futures contexts, where ruin is possible and "weather it" can be taken
+away by a margin clerk. This book has no leverage and no idiosyncratic
+holdings; nobody can force a sale, so every forced sale is one we would have
+built ourselves. Dry powder for crash-buying comes from ballast (treasuries,
+gold, cash — the rebalancing premium), never from stopping out correlated
+assets at their lows.

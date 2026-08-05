@@ -695,6 +695,7 @@ class PaperCycle:
         # Protective stops — direct, NEVER netted: a netted stop has no owning
         # sleeve and allocate_fill would mis-attribute the exit.
         protective_approvals = [a for a in approved_list if a.intent.is_protective]
+        approved_total = len(approved_list)  # report the true count, not post-filter
         approved_list = [a for a in approved_list if not a.intent.is_protective]
         for approval in protective_approvals:
             intent = approval.intent
@@ -806,7 +807,7 @@ class PaperCycle:
             reconciled=True,
             proposals=len(proposals),
             intents=len(intents),
-            approved=len(approved_list),
+            approved=approved_total,
             submitted=submitted,
             rejected_reasons=rejected,
             crosses_executed=crosses,

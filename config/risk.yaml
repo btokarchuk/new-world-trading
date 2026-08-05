@@ -95,8 +95,14 @@ protection:
   # fat-fingered tactical stop nobody chose; 40% away is not protection.
   band_min_pct: "20"
   band_max_pct: "30"
-  # control's benchmark lot rides crashes UNPROTECTED by design: a stopped
-  # benchmark is not a benchmark. Mirrored by protection_allowances in
-  # config/watchdog.yaml — update BOTH when resizing control.
-  exempt_sleeves: ["control"]
+  # POLICY REVERSED 2026-08-05 (owner decision, reasoning in
+  # docs/design/protective-stops.md addendum): index-ETF sleeves carry NO
+  # stops. Diversified index funds already own the protection a stop offers —
+  # survival — and the identity re-run priced the stop's cost: one COVID fill
+  # sold QQQ at the bottom by 19 cents, -1.45% CAGR for the decade. "Weather
+  # it" is always available to an unleveraged book; early exits are trend's
+  # job, not a depth trigger's. Stops stay MANDATORY for future sleeves
+  # holding single names or anything that can genuinely go to zero
+  # (llm_analyst) — new sleeves are protected BY DEFAULT unless added here.
+  exempt_sleeves: ["control", "trend_etf", "momentum", "mean_rev"]
   halt_on_fire: true

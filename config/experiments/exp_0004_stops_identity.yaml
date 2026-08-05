@@ -56,4 +56,4 @@ sleeves:
 # IMPLEMENTATION, not the strategies — any delta is a bug signal.
 protection:
   distance_pct: "25"
-  exempt_sleeves: ["control"]
+  exempt_sleeves: ["control", "trend_etf", "momentum", "mean_rev"]

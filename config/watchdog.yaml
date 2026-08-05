@@ -42,7 +42,10 @@ max_open_orders: 30
 # WARN during the calibration period; promote by flipping protection_critical
 # after two clean weeks. Crypto is exempt in code: Alpaca has no stop type
 # worth trusting there (design §7), so crypto is bounded by sleeve size.
-protection_check: true
+# Off while the whole book is index ETFs + crypto: every position is
+# deliberately unprotected (policy 2026-08-05), so coverage has nothing to
+# check. RE-ENABLE the day a single-name sleeve (llm_analyst) first trades.
+protection_check: false
 protection_critical: false
 protection_allowances:
   # control's benchmark lot: rides crashes by design (owner decision 2026-08-04,
