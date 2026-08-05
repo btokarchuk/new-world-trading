@@ -19,10 +19,11 @@ documented gap.
 """
 
 import sqlite3
+from collections import deque
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -83,9 +84,14 @@ class Watchdog:
         # restart SHOULD re-page, because a restarted supervisor cannot know
         # whether anyone saw the first alert.
         self._last_page_at_by_reason: dict[str, datetime] = {}
-        # Our own last loop time. If WE also missed our cadence, the whole host
-        # was suspended and the engine's late beat proves nothing.
-        self._last_loop_at: datetime | None = None
+        # Timestamps of our own completed loops. If WE were frozen for most of
+        # the window the engine is late for, the whole host was suspended and
+        # the lateness proves nothing. A single last-gap comparison is not
+        # enough: chained host naps (macOS power nap) let this loop re-baseline
+        # on each brief wake while the engine's 30-minute sleep chunk never
+        # completes, so the engine's lateness grows while our gap stays small —
+        # that exact shape cancelled the resting stops at 06:12 on 2026-08-05.
+        self._loop_history: deque[datetime] = deque(maxlen=1440)  # 24h at 60s
         self._page_backoff_s = float(getattr(config, "page_backoff_s", 900))
 
     def read_heartbeat(self) -> dict | None:
@@ -134,25 +140,24 @@ class Watchdog:
                 )
         critical = [b for b in breaches if b.severity == "CRITICAL"]
 
-        # A suspend freezes supervisor and engine alike. If our own loop lost
-        # at least as much time as the engine's beat is late, the lateness is
-        # explained by the gap, not by a hang — WARN and let the engine keep
-        # its positions rather than HALTing a system that never misbehaved.
-        skipped = self._co_suspended(self._now())
-        if skipped > 0:
-            explained = [
-                b for b in critical
-                if b.name == "heartbeat_overdue" and _late_seconds(b) <= skipped
-            ]
-            for breach in explained:
-                self._alerts.raise_alert(
-                    "WARN",
-                    "watchdog_suspend",
-                    f"{breach.detail} — explained by a {skipped:.0f}s gap in the"
-                    " watchdog's own loop (host suspended); not treating it as a hang",
-                    {**breach.model_dump(), "watchdog_gap_s": skipped},
-                )
-            critical = [b for b in critical if b not in explained]
+        # A suspend freezes supervisor and engine alike: a heartbeat breach is
+        # only actionable if THIS process was actually awake to witness the
+        # window it is judging. WARN and keep the engine's orders rather than
+        # HALTing a system that never misbehaved.
+        now = self._now()
+        explained = [
+            b for b in critical
+            if b.name == "heartbeat_overdue" and self._suspend_explains(_late_seconds(b), now)
+        ]
+        for breach in explained:
+            self._alerts.raise_alert(
+                "WARN",
+                "watchdog_suspend",
+                f"{breach.detail} — the watchdog itself was frozen for most of"
+                " that window (host suspended); not treating it as a hang",
+                breach.model_dump(),
+            )
+        critical = [b for b in critical if b not in explained]
 
         if not critical:
             self._alerts.ping_ok()
@@ -186,22 +191,32 @@ class Watchdog:
             )
         self._alerts.ping_fail(reason)
 
-    def _co_suspended(self, now: datetime) -> float:
-        """Seconds our own loop skipped, beyond its normal cadence.
+    def _suspend_explains(self, late_s: float, now: datetime) -> bool:
+        """Was this watchdog itself frozen for most of the engine's late window?
 
-        A laptop or VM suspend freezes the supervisor and the engine together,
-        so a late heartbeat after a suspend is not evidence of a wedged engine
-        — it is evidence that time moved while nobody was running. Cancelling
-        and HALTing on that is a false positive, and five of them in one night
-        (2026-08-04) cost a full trading day.
+        A host suspend freezes supervisor and engine together, so lateness
+        accrued while nobody was running proves nothing about the engine.
+        Measured as attendance over the whole overdue window — the fraction of
+        polls that should have run in [next_due, now] and actually did — not
+        as a single last-gap comparison, which chained brief wakes defeat.
 
-        Measured on the wall clock deliberately: a monotonic clock does not
-        advance across suspend, which is exactly the gap we need to see.
+        Wall clock deliberately: a monotonic clock does not advance across a
+        suspend, and that missing time is exactly what we are measuring. An
+        empty or too-young history never explains anything: a freshly
+        restarted watchdog must err toward acting, not excusing.
         """
-        if self._last_loop_at is None:
-            return 0.0
-        gap = (now - self._last_loop_at).total_seconds()
-        return max(0.0, gap - self._config.poll_interval_s)
+        if late_s <= 0 or not self._loop_history:
+            return False
+        window_start = now - timedelta(seconds=late_s)
+        if self._loop_history[0] > window_start:
+            # We cannot see the whole window; judge only the visible part.
+            window_start = self._loop_history[0]
+            late_s = (now - window_start).total_seconds()
+            if late_s < self._config.poll_interval_s:
+                return False
+        ran = sum(1 for t in self._loop_history if t >= window_start)
+        expected = late_s / self._config.poll_interval_s
+        return ran < 0.5 * expected
 
     def _halt_outstanding(self) -> bool:
         """True when a HALT we already issued has not been consumed yet."""
@@ -241,8 +256,8 @@ class Watchdog:
                 self.act(self.check())
             except Exception as exc:
                 self._survive(exc)
-            # Stamped AFTER acting so act() compares against the previous loop.
-            self._last_loop_at = self._now()
+            # Stamped AFTER acting so act() judges against completed loops only.
+            self._loop_history.append(self._now())
             if self._running:
                 self._sleep(self._config.poll_interval_s)
 

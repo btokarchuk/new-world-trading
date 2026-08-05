@@ -554,8 +554,10 @@ def test_host_suspend_is_not_treated_as_a_wedged_engine(tmp_path):
     broker = FakeBroker()
     watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
 
-    # Our own loop last ran 15 minutes ago: the host was asleep, not the engine.
-    watchdog._last_loop_at = NOW - timedelta(minutes=15)
+    # Sparse attendance: our loop ran a handful of times over the last hour
+    # (chained brief wakes) instead of the ~60 polls a healthy host would run.
+    for minutes in (60, 45, 30, 15):
+        watchdog._loop_history.append(NOW - timedelta(minutes=minutes))
     watchdog.act(watchdog.check())
 
     assert broker.cancel_calls == 0, "a suspended host must not trigger a cancel"
@@ -563,7 +565,7 @@ def test_host_suspend_is_not_treated_as_a_wedged_engine(tmp_path):
     warns = [a for a in alerts.alerts() if a["category"] == "watchdog_suspend"]
     assert len(warns) == 1
     assert warns[0]["severity"] == "WARN"
-    assert warns[0]["payload"]["watchdog_gap_s"] > 600
+    assert "host suspended" in warns[0]["message"]
 
 
 def test_wedged_engine_still_halts_when_the_watchdog_was_running(tmp_path):
@@ -575,8 +577,10 @@ def test_wedged_engine_still_halts_when_the_watchdog_was_running(tmp_path):
     broker = FakeBroker()
     watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
 
-    # Our loop ran one interval ago, exactly as scheduled.
-    watchdog._last_loop_at = NOW - timedelta(seconds=watchdog._config.poll_interval_s)
+    # Full attendance: our loop ran every interval through the late window.
+    interval = watchdog._config.poll_interval_s
+    for i in range(1, 15):
+        watchdog._loop_history.append(NOW - timedelta(seconds=i * interval))
     watchdog.act(watchdog.check())
 
     assert broker.cancel_calls == 1
@@ -682,3 +686,42 @@ def test_two_standing_warns_back_off_independently(tmp_path):
     warns = [a for a in alerts.alerts() if a["category"] == "unprotected_position"]
     # one page per symbol, not one per symbol per poll
     assert len(warns) == 2, [w["message"] for w in warns]
+
+
+def test_chained_naps_are_still_recognized_as_suspension(tmp_path):
+    """Regression (2026-08-05 06:12): macOS power-nap wakes let the watchdog
+    re-baseline on each brief wake while the engine's 30-minute sleep chunk
+    never completed. Single-gap comparison saw a small recent gap against a
+    2122s-late beat and cancelled the resting stops. Attendance over the whole
+    late window must recognize the pattern: few polls ran, host was frozen."""
+    risk_db = tmp_path / "data" / "risk.db"
+    write_heartbeat(risk_db, NOW - timedelta(seconds=2122))
+    broker = FakeBroker()
+    watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
+
+    # 2122s window at 60s polls should hold ~35 loops; only 3 brief wakes ran,
+    # the LAST one recently (the re-baseline that used to defeat detection).
+    for seconds in (2000, 1000, 30):
+        watchdog._loop_history.append(NOW - timedelta(seconds=seconds))
+
+    watchdog.act(watchdog.check())
+
+    assert broker.cancel_calls == 0, "chained naps must not cancel resting stops"
+    assert halt_rows(risk_db) == []
+    assert [a["category"] for a in alerts.alerts() if a["severity"] == "WARN"] == [
+        "watchdog_suspend"
+    ]
+
+
+def test_restarted_watchdog_with_no_history_still_acts(tmp_path):
+    """An empty loop history must never excuse a late engine: a freshly
+    restarted supervisor errs toward acting."""
+    risk_db = tmp_path / "data" / "risk.db"
+    write_heartbeat(risk_db, NOW - timedelta(minutes=30))
+    broker = FakeBroker()
+    watchdog, alerts, calls, _ = make_watchdog(tmp_path, broker, risk_db=risk_db)
+
+    watchdog.act(watchdog.check())
+
+    assert broker.cancel_calls == 1
+    assert len(halt_rows(risk_db)) == 1
