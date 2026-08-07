@@ -20,7 +20,6 @@ x-common: &common
   environment:
     # Corporate TLS-intercepting proxies need their CA inside the container too.
     # Unset on a clean network; harmless when the path does not exist.
-    SSL_CERT_FILE: ${NWT_CA_CERT:-/etc/ssl/certs/ca-certificates.crt}
     TZ: America/New_York
   volumes:
     - ../data:/app/data

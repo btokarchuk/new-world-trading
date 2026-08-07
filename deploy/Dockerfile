@@ -51,7 +51,8 @@ RUN useradd --uid 1000 --create-home --shell /bin/bash nwt \
     && chown -R nwt:nwt /app /opt/venv
 USER nwt
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
+COPY deploy/entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
 # Idle by default so a bare `docker run` lands somewhere safe to exec into; the
 # real commands are set per service in docker-compose.yml (engine: `nwt-risk
 # run`, watchdog: `nwt-watchdog`).
