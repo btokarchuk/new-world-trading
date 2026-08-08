@@ -18,6 +18,11 @@ x-common: &common
   image: nwt-stack:local
   working_dir: /app
   environment:
+    # The entrypoint assembles this bundle (public roots + mounted corp CAs)
+    # for the daemon. Set here TOO because `docker exec` sessions skip the
+    # entrypoint: without this, attended commands (make cycle/status) fail
+    # TLS verification whenever the host sits behind the corp proxy.
+    SSL_CERT_FILE: /tmp/nwt-ca-bundle.pem
     # Corporate TLS-intercepting proxies need their CA inside the container too.
     # Unset on a clean network; harmless when the path does not exist.
     TZ: America/New_York

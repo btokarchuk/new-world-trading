@@ -29,11 +29,13 @@ COPY engine/pyproject.toml engine/
 COPY research/pyproject.toml research/
 COPY risk/pyproject.toml risk/
 COPY watchdog/pyproject.toml watchdog/
+COPY backend/pyproject.toml backend/
 RUN mkdir -p contracts/src/nwt_contracts engine/src/nwt_engine \
              research/src/nwt_research risk/src/nwt_risk watchdog/src/nwt_watchdog \
+             backend/src/nwt_backend \
     && touch contracts/src/nwt_contracts/__init__.py engine/src/nwt_engine/__init__.py \
              research/src/nwt_research/__init__.py risk/src/nwt_risk/__init__.py \
-             watchdog/src/nwt_watchdog/__init__.py \
+             watchdog/src/nwt_watchdog/__init__.py backend/src/nwt_backend/__init__.py \
     && uv sync --all-packages --no-dev --frozen
 
 # Source layer.
@@ -42,6 +44,7 @@ COPY engine/ engine/
 COPY research/ research/
 COPY risk/ risk/
 COPY watchdog/ watchdog/
+COPY backend/ backend/
 RUN uv sync --all-packages --no-dev --frozen
 
 # Non-root. uid 1000 keeps bind-mount writes sane on Linux hosts; macOS bind
